@@ -40,16 +40,16 @@ from torch import Tensor, nn
 from torch.nn import CrossEntropyLoss, Identity
 from torch.utils.checkpoint import checkpoint
 
-from .activations import get_activation
-from .configuration_utils import PretrainedConfig
-from .dynamic_module_utils import custom_object_save
-from .generation import CompileConfig, GenerationConfig, GenerationMixin
-from .integrations import PeftAdapterMixin, deepspeed_config, is_deepspeed_zero3_enabled
-from .integrations.flash_attention import flash_attention_forward
-from .integrations.flex_attention import flex_attention_forward
-from .integrations.sdpa_attention import sdpa_attention_forward
-from .loss.loss_utils import LOSS_MAPPING
-from .pytorch_utils import (  # noqa: F401
+from activations import get_activation
+from configuration_utils import PretrainedConfig
+from dynamic_module_utils import custom_object_save
+from generation import CompileConfig, GenerationConfig, GenerationMixin
+from integrations import PeftAdapterMixin, deepspeed_config, is_deepspeed_zero3_enabled
+from integrations.flash_attention import flash_attention_forward
+from integrations.flex_attention import flex_attention_forward
+from integrations.sdpa_attention import sdpa_attention_forward
+from loss.loss_utils import LOSS_MAPPING
+from pytorch_utils import (  # noqa: F401
     Conv1D,
     apply_chunking_to_forward,
     find_pruneable_heads_and_indices,
@@ -60,10 +60,10 @@ from .pytorch_utils import (  # noqa: F401
     prune_linear_layer,
     translate_to_torch_parallel_style,
 )
-from .quantizers import AutoHfQuantizer, HfQuantizer
-from .quantizers.quantizers_utils import get_module_from_name
-from .safetensors_conversion import auto_conversion
-from .utils import (
+from quantizers import AutoHfQuantizer, HfQuantizer
+from quantizers.quantizers_utils import get_module_from_name
+from safetensors_conversion import auto_conversion
+from utils import (
     ACCELERATE_MIN_VERSION,
     ADAPTER_SAFE_WEIGHTS_NAME,
     ADAPTER_WEIGHTS_NAME,
@@ -100,14 +100,14 @@ from .utils import (
     replace_return_docstrings,
     strtobool,
 )
-from .utils.hub import create_and_tag_model_card, get_checkpoint_shard_files
-from .utils.import_utils import (
+from utils.hub import create_and_tag_model_card, get_checkpoint_shard_files
+from utils.import_utils import (
     ENV_VARS_TRUE_VALUES,
     is_sagemaker_mp_enabled,
     is_torch_fx_proxy,
     is_torchdynamo_compiling,
 )
-from .utils.quantization_config import BitsAndBytesConfig, QuantizationMethod
+from utils.quantization_config import BitsAndBytesConfig, QuantizationMethod
 
 
 XLA_USE_BF16 = os.environ.get("XLA_USE_BF16", "0").upper()

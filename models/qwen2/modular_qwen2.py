@@ -4,12 +4,12 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 
-from ...cache_utils import Cache
-from ...modeling_flash_attention_utils import FlashAttentionKwargs
-from ...modeling_utils import ALL_ATTENTION_FUNCTIONS
-from ...processing_utils import Unpack
-from ...utils import logging
-from ..llama.modeling_llama import (
+from cache_utils import Cache
+from modeling_flash_attention_utils import FlashAttentionKwargs
+from modeling_utils import ALL_ATTENTION_FUNCTIONS
+from processing_utils import Unpack
+from utils import logging
+from models.llama.modeling_llama import (
     LlamaAttention,
     LlamaDecoderLayer,
     LlamaForCausalLM,
@@ -21,7 +21,7 @@ from ..llama.modeling_llama import (
     apply_rotary_pos_emb,
     eager_attention_forward,
 )
-from .configuration_qwen2 import Qwen2Config
+from models.qwen2.configuration_qwen2 import Qwen2Config
 
 
 logger = logging.get_logger(__name__)

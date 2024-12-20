@@ -24,10 +24,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from packaging import version
 
-from . import __version__
-from .dynamic_module_utils import custom_object_save
-from .modeling_gguf_pytorch_utils import load_gguf_checkpoint
-from .utils import (
+import __version__
+from dynamic_module_utils import custom_object_save
+from modeling_gguf_pytorch_utils import load_gguf_checkpoint
+from utils import (
     CONFIG_NAME,
     PushToHubMixin,
     add_model_info_to_auto_map,
@@ -40,7 +40,7 @@ from .utils import (
     is_torch_available,
     logging,
 )
-from .utils.generic import is_timm_config_dict
+from utils.generic import is_timm_config_dict
 
 
 logger = logging.get_logger(__name__)

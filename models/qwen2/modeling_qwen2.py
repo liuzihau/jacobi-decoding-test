@@ -9,22 +9,22 @@ from typing import Callable, List, Optional, Tuple, Union
 import torch
 from torch import nn
 
-from ...activations import ACT2FN
-from ...cache_utils import Cache, DynamicCache, StaticCache
-from ...generation import GenerationMixin
-from ...modeling_attn_mask_utils import AttentionMaskConverter
-from ...modeling_flash_attention_utils import FlashAttentionKwargs
-from ...modeling_outputs import (
+from activations import ACT2FN
+from cache_utils import Cache, DynamicCache, StaticCache
+from generation import GenerationMixin
+from modeling_attn_mask_utils import AttentionMaskConverter
+from modeling_flash_attention_utils import FlashAttentionKwargs
+from modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
     QuestionAnsweringModelOutput,
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
-from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from ...processing_utils import Unpack
-from ...utils import (
+from modeling_rope_utils import ROPE_INIT_FUNCTIONS
+from modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from processing_utils import Unpack
+from utils import (
     LossKwargs,
     add_code_sample_docstrings,
     add_start_docstrings,
@@ -32,7 +32,7 @@ from ...utils import (
     logging,
     replace_return_docstrings,
 )
-from .configuration_qwen2 import Qwen2Config
+from models.qwen2.configuration_qwen2 import Qwen2Config
 
 
 logger = logging.get_logger(__name__)

@@ -23,8 +23,8 @@ __version__ = "4.48.0.dev0"
 from typing import TYPE_CHECKING
 
 # Check the dependencies satisfy the minimal versions required.
-from . import dependency_versions_check
-from .utils import (
+import dependency_versions_check
+from utils import (
     OptionalDependencyNotAvailable,
     _LazyModule,
     is_bitsandbytes_available,

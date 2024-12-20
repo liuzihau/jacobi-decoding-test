@@ -13,7 +13,7 @@
 # limitations under the License.
 from typing import TYPE_CHECKING
 
-from ...utils import (
+from utils import (
     OptionalDependencyNotAvailable,
     _LazyModule,
     is_tokenizers_available,
@@ -51,8 +51,8 @@ else:
 
 
 if TYPE_CHECKING:
-    from .configuration_qwen2 import Qwen2Config
-    from .tokenization_qwen2 import Qwen2Tokenizer
+    from models.qwen2.configuration_qwen2 import Qwen2Config
+    from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
     try:
         if not is_tokenizers_available():
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     except OptionalDependencyNotAvailable:
         pass
     else:
-        from .tokenization_qwen2_fast import Qwen2TokenizerFast
+        from models.qwen2.tokenization_qwen2_fast import Qwen2TokenizerFast
 
     try:
         if not is_torch_available():
@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     except OptionalDependencyNotAvailable:
         pass
     else:
-        from .modeling_qwen2 import (
+        from models.qwen2.modeling_qwen2 import (
             Qwen2ForCausalLM,
             Qwen2ForQuestionAnswering,
             Qwen2ForSequenceClassification,

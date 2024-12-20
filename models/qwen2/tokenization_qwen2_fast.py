@@ -16,10 +16,10 @@
 
 from typing import Optional, Tuple
 
-from ...tokenization_utils import AddedToken
-from ...tokenization_utils_fast import PreTrainedTokenizerFast
-from ...utils import logging
-from .tokenization_qwen2 import Qwen2Tokenizer
+from tokenization_utils import AddedToken
+from tokenization_utils_fast import PreTrainedTokenizerFast
+from utils import logging
+from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
 
 logger = logging.get_logger(__name__)

@@ -8,14 +8,14 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 from packaging import version
 
-from .configuration_utils import PretrainedConfig
-from .utils import (
+from configuration_utils import PretrainedConfig
+from utils import (
     is_hqq_available,
     is_optimum_quanto_available,
     is_torchdynamo_compiling,
     logging,
 )
-from .utils.deprecation import deprecate_kwarg
+from utils.deprecation import deprecate_kwarg
 
 
 if is_hqq_available():

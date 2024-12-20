@@ -23,23 +23,23 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 
-from ...activations import ACT2FN
-from ...cache_utils import Cache, DynamicCache, StaticCache
-from ...generation import GenerationMixin
-from ...modeling_attn_mask_utils import AttentionMaskConverter
-from ...modeling_flash_attention_utils import FlashAttentionKwargs
-from ...modeling_outputs import (
+from activations import ACT2FN
+from cache_utils import Cache, DynamicCache, StaticCache
+from generation import GenerationMixin
+from modeling_attn_mask_utils import AttentionMaskConverter
+from modeling_flash_attention_utils import FlashAttentionKwargs
+from modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
     QuestionAnsweringModelOutput,
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
-from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from ...processing_utils import Unpack
-from ...pytorch_utils import ALL_LAYERNORM_LAYERS
-from ...utils import (
+from modeling_rope_utils import ROPE_INIT_FUNCTIONS
+from modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from processing_utils import Unpack
+from pytorch_utils import ALL_LAYERNORM_LAYERS
+from utils import (
     LossKwargs,
     add_code_sample_docstrings,
     add_start_docstrings,
@@ -47,7 +47,7 @@ from ...utils import (
     logging,
     replace_return_docstrings,
 )
-from .configuration_llama import LlamaConfig
+from models.llama.configuration_llama import LlamaConfig
 
 
 logger = logging.get_logger(__name__)

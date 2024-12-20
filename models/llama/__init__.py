@@ -13,7 +13,7 @@
 # limitations under the License.
 from typing import TYPE_CHECKING
 
-from ...utils import (
+from utils import (
     OptionalDependencyNotAvailable,
     _LazyModule,
     is_flax_available,
@@ -92,7 +92,7 @@ if TYPE_CHECKING:
     except OptionalDependencyNotAvailable:
         pass
     else:
-        from .modeling_llama import (
+        from models.llama.modeling_llama import (
             LlamaForCausalLM,
             LlamaForQuestionAnswering,
             LlamaForSequenceClassification,
@@ -107,7 +107,7 @@ if TYPE_CHECKING:
     except OptionalDependencyNotAvailable:
         pass
     else:
-        from .modeling_flax_llama import FlaxLlamaForCausalLM, FlaxLlamaModel, FlaxLlamaPreTrainedModel
+        from models.llama.modeling_flax_llama import FlaxLlamaForCausalLM, FlaxLlamaModel, FlaxLlamaPreTrainedModel
 
 
 else:
