@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from packaging import version
 
-import __version__
+# import __version__
 from dynamic_module_utils import custom_object_save
 from modeling_gguf_pytorch_utils import load_gguf_checkpoint
 from utils import (
