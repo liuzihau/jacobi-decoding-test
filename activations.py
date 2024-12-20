@@ -19,7 +19,7 @@ import torch
 from packaging import version
 from torch import Tensor, nn
 
-from .utils import logging
+from utils import logging
 
 
 logger = logging.get_logger(__name__)

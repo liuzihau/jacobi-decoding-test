@@ -63,9 +63,10 @@ from huggingface_hub.utils import (
 from huggingface_hub.utils._deprecation import _deprecate_method
 from requests.exceptions import HTTPError
 
-from . import __version__, logging
-from .generic import working_or_temp_dir
-from .import_utils import (
+# from . import __version__
+from utils import logging
+from utils.generic import working_or_temp_dir
+from utils.import_utils import (
     ENV_VARS_TRUE_VALUES,
     _tf_version,
     _torch_version,
@@ -73,7 +74,7 @@ from .import_utils import (
     is_torch_available,
     is_training_run_on_sagemaker,
 )
-from .logging import tqdm
+from utils.logging import tqdm
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name

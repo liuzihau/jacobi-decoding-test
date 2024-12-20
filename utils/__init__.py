@@ -23,10 +23,10 @@ from huggingface_hub.constants import HF_HUB_DISABLE_TELEMETRY as DISABLE_TELEME
 from packaging import version
 
 from .. import __version__
-from .backbone_utils import BackboneConfigMixin, BackboneMixin
-from .chat_template_utils import DocstringParsingException, TypeHintParsingException, get_json_schema
-from .constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_STANDARD_MEAN, IMAGENET_STANDARD_STD
-from .doc import (
+from utils.backbone_utils import BackboneConfigMixin, BackboneMixin
+from utils.chat_template_utils import DocstringParsingException, TypeHintParsingException, get_json_schema
+from utils.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_STANDARD_MEAN, IMAGENET_STANDARD_STD
+from utils.doc import (
     add_code_sample_docstrings,
     add_end_docstrings,
     add_start_docstrings,
@@ -34,7 +34,7 @@ from .doc import (
     copy_func,
     replace_return_docstrings,
 )
-from .generic import (
+from utils.generic import (
     ContextManagers,
     ExplicitEnum,
     LossKwargs,
@@ -71,7 +71,7 @@ from .generic import (
     transpose,
     working_or_temp_dir,
 )
-from .hub import (
+from utils.hub import (
     CLOUDFRONT_DISTRIB_PREFIX,
     HF_MODULES_CACHE,
     HUGGINGFACE_CO_PREFIX,
@@ -101,7 +101,7 @@ from .hub import (
     send_example_telemetry,
     try_to_load_from_cache,
 )
-from .import_utils import (
+from utils.import_utils import (
     ACCELERATE_MIN_VERSION,
     ENV_VARS_TRUE_AND_AUTO_VALUES,
     ENV_VARS_TRUE_VALUES,
@@ -236,7 +236,7 @@ from .import_utils import (
     requires_backends,
     torch_only_method,
 )
-from .peft_utils import (
+from utils.peft_utils import (
     ADAPTER_CONFIG_NAME,
     ADAPTER_SAFE_WEIGHTS_NAME,
     ADAPTER_WEIGHTS_NAME,
