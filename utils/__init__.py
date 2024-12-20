@@ -22,7 +22,7 @@ from huggingface_hub import get_full_repo_name  # for backward compatibility
 from huggingface_hub.constants import HF_HUB_DISABLE_TELEMETRY as DISABLE_TELEMETRY  # for backward compatibility
 from packaging import version
 
-from .. import __version__
+# from .. import __version__
 from utils.backbone_utils import BackboneConfigMixin, BackboneMixin
 from utils.chat_template_utils import DocstringParsingException, TypeHintParsingException, get_json_schema
 from utils.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_STANDARD_MEAN, IMAGENET_STANDARD_STD
