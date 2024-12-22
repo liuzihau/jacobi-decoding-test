@@ -805,7 +805,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         self.embed_tokens = value
 
 
-    def get_pre_setting(self, input_ids, inputs_embeds):
+    def get_pre_setting(self, input_ids, inputs_embeds, output_attentions, output_hidden_states, use_cache, return_dict):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -867,7 +867,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         
-        output_attentions, output_hidden_states, return_dict, use_cache, return_legacy_cache = self.get_pre_setting(input_ids, inputs_embeds)
+        output_attentions, output_hidden_states, return_dict, use_cache, return_legacy_cache = self.get_pre_setting(input_ids, inputs_embeds, output_attentions, output_hidden_states, use_cache, return_dict)
         inputs_embeds = self.run_embedding(input_ids, inputs_embeds)
 
         print(cache_position, position_ids, past_key_values)
