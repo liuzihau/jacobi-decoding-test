@@ -32,7 +32,7 @@ from transformers.utils import logging
 
 
 if TYPE_CHECKING:
-    from tokenization_utils_base import TextInput
+    from transformers.tokenization_utils_base import TextInput
 
 logger = logging.get_logger(__name__)
 
