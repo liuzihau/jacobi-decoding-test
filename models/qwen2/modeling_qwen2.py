@@ -49,7 +49,7 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from models.configuration_qwen2 import Qwen2Config
+from models.qwen2.configuration_qwen2 import Qwen2Config
 
 
 if is_flash_attn_2_available():

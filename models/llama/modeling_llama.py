@@ -49,7 +49,7 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from models.configuration_llama import LlamaConfig
+from models.qwen2.configuration_llama import LlamaConfig
 
 
 logger = logging.get_logger(__name__)
