@@ -26,7 +26,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     
-    def __init__(self, config, jacobi_token_nums=2, mix_sequences=2):
+    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1):
         super().__init__(config)
         self.confg = config
         self.model = Qwen2Model(config)
@@ -35,13 +35,12 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         attn_hidden_size = config.hidden_size
         attn_layers = config.num_hidden_layers
-        
-        self.adapters = [nn.Linear((n+2)*attn_hidden_size, attn_hidden_size) for n in range(mix_sequences)]
-        self.mix_sequences = mix_sequences
-        self.jacobi_weight = nn.Parameter(torch.randn(attn_hidden_size)).detach()
-        self.jacobi_token_nums = jacobi_token_nums
-        self.jacobi_token_sequence = self.jacobi_weight.unsqueeze(0).unsqueeze(0).repeat(1, self.jacobi_token_nums, 1)
 
+        self.adapters = nn.ModuleList([nn.Linear((n+2)*attn_hidden_size, attn_hidden_size) for n in range(mix_sequences)])
+        self.mix_sequences = mix_sequences
+        
+        self.jacobi_weight = nn.Parameter(torch.randn(attn_hidden_size, device=self.model.device))
+        self.jacobi_token_nums = jacobi_token_nums
 
         # for adapter in self.adapters:
             # self.init_weights(adapter)
@@ -78,7 +77,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     
     def merge_with_jacobi_tokens(self, inputs_embeds, jacobi_tokens=None):
         if jacobi_tokens is None:
-            return torch.cat([inputs_embeds, self.jacobi_token_sequence], dim=1)
+            jacobi_sequence = self.jacobi_weight.unsqueeze(0).unsqueeze(0).repeat(1, self.jacobi_token_nums, 1)
+            return torch.cat([inputs_embeds, jacobi_sequence], dim=1)
     
     def run_decoder_layer_with_previous_hidden_proj(self, decoder_layer, hidden_states, causal_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings):
         residual = hidden_states
@@ -104,9 +104,25 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         hidden_states = decoder_layer.post_attention_layernorm(hidden_states)
         hidden_states = decoder_layer.mlp(hidden_states)
         hidden_states = residual + hidden_states
-
-        # previous token project
         
+        # previous token projection
+        layer_idx = decoder_layer.self_attn.layer_idx
+        if layer_idx % 4 == 0 and layer_idx > 0:
+            target_states = hidden_states[:, -(self.jacobi_token_nums+self.mix_sequences):, :]
+            curr_states = target_states[:, -self.jacobi_token_nums:, :]
+            new_states = None
+            for i in range(self.mix_sequences):
+                prev_states = target_states[:, -(self.jacobi_token_nums+i+1):-(i+1), :]
+                curr_states = torch.cat([curr_states, prev_states], dim=-1)
+                
+                if new_states is None:
+                    new_states = self.adapters[i](curr_states)
+                else:
+                    new_states += self.adapters[i](curr_states)
+
+            new_states /= self.mix_sequences
+            hidden_states = torch.cat([hidden_states[:, :-self.jacobi_token_nums, :], new_states], dim=-2)
+
         outputs = (hidden_states,)
         if output_attentions:
             outputs += (self_attn_weights,)

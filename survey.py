@@ -10,4 +10,4 @@ model = Qwen2JacobiForCausalLM.from_pretrained(
 )
 tokenizer = Qwen2TokenizerFast.from_pretrained(model_name)
 
-print(model)
+print(model.device)
