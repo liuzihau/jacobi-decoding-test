@@ -96,9 +96,9 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
             return modified_embeds
 
-        if jacobi_tokens is None:
-            jacobi_sequence = self.jacobi_weight.unsqueeze(0).unsqueeze(0).repeat(inputs_embeds.shape[0], self.jacobi_token_nums, 1)
-            return torch.cat([inputs_embeds, jacobi_sequence], dim=1)
+        # if jacobi_tokens is None:
+        #     jacobi_sequence = self.jacobi_weight.unsqueeze(0).unsqueeze(0).repeat(inputs_embeds.shape[0], self.jacobi_token_nums, 1)
+        #     return torch.cat([inputs_embeds, jacobi_sequence], dim=1)
     
     def run_decoder_layer_with_previous_hidden_proj(self, decoder_layer, hidden_states, causal_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings):
         residual = hidden_states
@@ -301,14 +301,21 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        lm_hidden_states = hidden_states[:, :-self.jacobi_token_nums, :]
-        jacobi_hidden_states = hidden_states[:, -self.jacobi_token_nums:, :]
+        logits = self.lm_head(hidden_states)
 
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        num_logits_to_keep = num_logits_to_keep + self.jacobi_token_nums
-        logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
-        lm_logits = logits[:, :-self.jacobi_token_nums, :]
-        jacobi_logits = logits[:, -self.jacobi_token_nums:, :]
+        jacobi_hidden_states = []
+        jacobi_logits = []
+        # Iterate through the batch dimension
+        for i in range(inputs_embeds.shape[0]):
+            replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
+            replace_indices = replace_indices[:self.jacobi_token_nums]
+            # lm_hidden_states = hidden_states[:, :-self.jacobi_token_nums, :]
+            jacobi_hidden_states.append(hidden_states[i, replace_indices, :])
+
+            # lm_logits = logits[:, :-self.jacobi_token_nums, :]
+            jacobi_logits.append(logits[i, replace_indices, :])
+        jacobi_hidden_states = torch.stack(jacobi_hidden_states, dim=0)
+        jacobi_logits = torch.stack(jacobi_logits, dim=0)
         
         # loss = None
         # if labels is not None:
@@ -321,10 +328,10 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         return JacobiCausalLMOutputWithPast(
             # loss=loss,
-            logits=lm_logits,
+            # logits=lm_logits,
             jacobi_logits=jacobi_logits,
             past_key_values=outputs.past_key_values,
-            hidden_states=lm_hidden_states,
+            # hidden_states=lm_hidden_states,
             jacobi_hidden_states=jacobi_hidden_states,
             attentions=outputs.attentions,
         )
