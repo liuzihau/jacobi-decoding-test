@@ -34,7 +34,7 @@ def top_accuracy(output, target, topk=(1,)):
             res.append(correct_k)
         return res
     
-def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, criterion, loss_mask):
+def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, criterion, loss_mask=None):
     # cross entropy -> sample distribution difference
     target_p = nn.LogSoftmax(dim=2)(target_logits)
     out_logp = nn.LogSoftmax(dim=2)(jacobi_logits)
@@ -201,6 +201,7 @@ for epoch in range(num_epochs + 1):
             output = model(input_ids=data["input_ids"], 
                             attention_mask=data["attention_mask"],
                             loss_mask=data["loss_mask"],
+                            use_cache=False,
                             output_hidden_states=True,
                             return_dict=True)
             with torch.no_grad():
