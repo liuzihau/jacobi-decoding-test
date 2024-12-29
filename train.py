@@ -226,11 +226,12 @@ for epoch in range(num_epochs + 1):
             # target = target.view(-1)[loss_mask.view(-1) == 1]
             topkacc = top_accuracy(output['jacobi_logits'], target, (1, 2, 3))
             for top_i in range(len(topkacc)):
-                for seq in range(top_3acc[top_i]):
+                for seq in range(len(top_3acc[top_i])):
                     top_3acc[top_i][seq] += topkacc[top_i][seq]
             total += ct
-            for seq in range(len(correct)):
-                correct[seq] += cc[seq].float().item()
+            for bs in range(cc.shape[0]):
+                for seq in range(len(correct)):
+                    correct[seq] += cc[bs, seq].float().item()
         if accelerator.is_main_process and ct != 0:
             logdict = {"train/lr": optimizer.optimizer.param_groups[0]["lr"], "train/vloss": vloss.item(),
                        "train/ploss": ploss.item(), "train/loss": loss.item(), "train/acc": cc / ct}
