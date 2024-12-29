@@ -39,8 +39,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.adapters = nn.ModuleList([nn.Linear((n+2)*attn_hidden_size, attn_hidden_size) for n in range(mix_sequences)])
         self.mix_sequences = mix_sequences
         
-        self.jacobi_weight = nn.Parameter(torch.randn(attn_hidden_size, device=self.model.device))
-        self.jacobi_token_nums = jacobi_token_nums
+        self.jacobi_weight = nn.Parameter(torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5).to(dtype=torch.bfloat16)        self.jacobi_token_nums = jacobi_token_nums
 
         # for adapter in self.adapters:
             # self.init_weights(adapter)
