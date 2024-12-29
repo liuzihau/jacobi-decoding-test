@@ -1,7 +1,7 @@
 import os
 import gc
 import json
-import tqdm
+from tqdm import tqdm
 
 import torch
 from torch.utils.data import DataLoader
@@ -19,6 +19,7 @@ from models.qwen2.tokenization_qwen2_fast import Qwen2TokenizerFast
 def top_accuracy(output, target, topk=(1,)):
     # output.shape (bs, num_classes), target.shape (bs, )
     """Computes the accuracy over the k top predictions for the specified values of k"""
+
     with torch.no_grad():
         maxk = max(topk)
         batch_size = target.size(0)
@@ -111,7 +112,7 @@ def cllm_loss():
 
     return loss
 
-CONFIG_PATH = '/content/EAGLE/eagle/train/train_config.json'
+CONFIG_PATH = '/content/jacobi-decoding-test/configs/train_config.json'
 PROJECT = 'Jacobi-test'
 GAMMA = 0.9
 
@@ -148,8 +149,8 @@ for param in model.model.parameters():
 datapath = list_files(train_config["datapath"])
 
 # data part
-traindatapath = datapath[:int(len(datapath) * 0.95)]
-testdatapath = datapath[int(len(datapath) * 0.95):]
+traindatapath = datapath[:int(len(datapath) * 0.1)]
+testdatapath = datapath[int(len(datapath) * 0.1):int(len(datapath) * 0.15)]
 
 traindataset = CustomDataset(traindatapath, jacobi_tokens=train_config["jacobi_token_nums"])
 testdataset = CustomDataset(testdatapath, jacobi_tokens=train_config["jacobi_token_nums"])
@@ -199,6 +200,7 @@ for epoch in range(num_epochs + 1):
             optimizer.zero_grad()
             output = model(input_ids=data["input_ids"], 
                             attention_mask=data["attention_mask"],
+                            loss_mask=data["loss_mask"],
                             output_hidden_states=True,
                             return_dict=True)
             with torch.no_grad():

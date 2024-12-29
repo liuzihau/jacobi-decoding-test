@@ -75,9 +75,29 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
     
-    def merge_with_jacobi_tokens(self, inputs_embeds, jacobi_tokens=None):
+    def merge_with_jacobi_tokens(self, inputs_embeds, loss_mask, jacobi_tokens=None):
         if jacobi_tokens is None:
-            jacobi_sequence = self.jacobi_weight.unsqueeze(0).unsqueeze(0).repeat(1, self.jacobi_token_nums, 1)
+            # Clone inputs_embeds to avoid modifying the original tensor
+            modified_embeds = inputs_embeds.clone()
+
+            # Iterate through the batch dimension
+            for i in range(inputs_embeds.shape[0]):
+                # Find indices where loss_mask == 1 for this batch
+                replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
+
+                # Ensure the number of replace indices matches the jacobi tokens
+                assert len(replace_indices) >= self.jacobi_token_nums, "Not enough positions in loss_mask to replace with all jacobi tokens"
+
+                # Select the first `jacobi_token_nums` indices to replace
+                replace_indices = replace_indices[:self.jacobi_token_nums]
+
+                # Replace embeddings at the specified indices with jacobi tokens
+                modified_embeds[i, replace_indices] = self.jacobi_weight
+
+            return modified_embeds
+
+        if jacobi_tokens is None:
+            jacobi_sequence = self.jacobi_weight.unsqueeze(0).unsqueeze(0).repeat(inputs_embeds.shape[0], self.jacobi_token_nums, 1)
             return torch.cat([inputs_embeds, jacobi_sequence], dim=1)
     
     def run_decoder_layer_with_previous_hidden_proj(self, decoder_layer, hidden_states, causal_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings):
@@ -171,6 +191,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
+        loss_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
@@ -192,7 +213,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         inputs_embeds = self.model.run_embedding(input_ids, inputs_embeds)
 
         # insert jacobi tokens
-        inputs_embeds = self.merge_with_jacobi_tokens(inputs_embeds)
+        inputs_embeds = self.merge_with_jacobi_tokens(inputs_embeds, loss_mask)
 
         # print(cache_position, position_ids)
 
@@ -246,6 +267,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
+        loss_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
@@ -267,6 +289,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         outputs = self.get_feature(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            loss_mask=loss_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
