@@ -23,14 +23,14 @@ def top_accuracy(output, target, topk=(1,)):
     with torch.no_grad():
         maxk = max(topk)
         batch_size = target.size(0)
-
-        _, pred = output.topk(maxk, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
+        seq_size = target.size(1)
+        _, pred = output.topk(maxk, -1, True, True)  # bs, seq, topk ex [4, 10, 3]
+        # pred = pred.t()
+        correct = pred.eq(target.view(batch_size, seq_size, -1).expand_as(pred))
 
         res = []
         for k in topk:
-            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:, :, :k].float().sum(0).sum(-1)
             res.append(correct_k)
         return res
     
@@ -188,8 +188,8 @@ else:
     )
 # accelerator.load_state("checkpoints/state_5")
 for epoch in range(num_epochs + 1):
-    top_3acc = [0 for _ in range(3)]
-    correct = 0
+    top_3acc = [[0 for _ in range(train_config["jacobi_token_nums"])] for _ in range(3)]
+    correct = [0 for _ in range(train_config["jacobi_token_nums"])]
     total = 0
     epoch_loss = 0
     num_batches = 0
@@ -220,25 +220,28 @@ for epoch in range(num_epochs + 1):
         with torch.no_grad():
             _, predicted = torch.max(output['jacobi_logits'], 2)
             _, target = torch.max(target_head, 2)
-            ct = predicted.shape[1]
+            ct = predicted.shape[0]
             cc = (predicted == target) 
             # out_head = out_head.view(-1, target_head.shape[-1])[loss_mask.view(-1) == 1]
             # target = target.view(-1)[loss_mask.view(-1) == 1]
             topkacc = top_accuracy(output['jacobi_logits'], target, (1, 2, 3))
             for top_i in range(len(topkacc)):
-                top_3acc[top_i] += topkacc[top_i]
+                for seq in range(top_3acc[top_i]):
+                    top_3acc[top_i][seq] += topkacc[top_i][seq]
             total += ct
-            correct += cc
+            for seq in range(len(correct)):
+                correct[seq] += cc[seq].float().item()
         if accelerator.is_main_process and ct != 0:
             logdict = {"train/lr": optimizer.optimizer.param_groups[0]["lr"], "train/vloss": vloss.item(),
                        "train/ploss": ploss.item(), "train/loss": loss.item(), "train/acc": cc / ct}
             for id, i in enumerate(top_3acc):
-                logdict[f'train/top_{id + 1}_acc'] = topkacc[id].item() / ct
+                for seq in range(len(i)):
+                    logdict[f'train/top_{id + 1}_token_{seq}_acc'] = topkacc[id][seq].item() / ct
             wandb.log(logdict)
             # for id,i in enumerate(top_3acc):
             #     wandb.log({f'train/top_{id+1}_acc':topkacc[id].item()/ct})
 
-        del ploss, vloss, out_head, target_head, target_p
+        del ploss, vloss, target_head
         gc.collect()
         torch.cuda.empty_cache()
         epoch_loss += loss.item()
