@@ -10,4 +10,5 @@ model = Qwen2JacobiForCausalLM.from_pretrained(
 )
 tokenizer = Qwen2TokenizerFast.from_pretrained(model_name)
 
-print(model.device)
+for name, param in model.named_parameters():
+    print(f"Name: {name}, Shape: {param.shape}, Requires Grad: {param.requires_grad}")
