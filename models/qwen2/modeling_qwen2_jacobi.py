@@ -39,8 +39,9 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.adapters = nn.ModuleList([nn.Linear((n+2)*attn_hidden_size, attn_hidden_size) for n in range(mix_sequences)])
         self.mix_sequences = mix_sequences
         
-        self.jacobi_weight = nn.Parameter(torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5)
-        self.jacobi_weight.data = self.jacobi_weight.data.to(device=self.model.device, dtype=torch.bfloat16)
+        temp_weight = torch.ones((attn_hidden_size,), device='cuda', dtype=torch.float32) * 1e-5
+        temp_weight = temp_weight.to(dtype=torch.bfloat16)  # can be remove?
+        self.jacobi_weight = nn.Parameter(temp_weight)
    
         self.jacobi_token_nums = jacobi_token_nums
 
@@ -50,14 +51,14 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         
         self.post_init()
 
-    # def init_weights(self, module):
-    #     std = self.config.initializer_range
-    #     if isinstance(module, nn.Linear):
-    #         module.weight.data.normal_(mean=0.0, std=std)
-    #         if module.bias is not None:
-    #             module.bias.data.zero_()
-    #     elif isinstance(module, nn.Parameter):
-    #         module.data.normal_(mean=0.0, std=std)
+    def init_trainable_weights(self, module):
+        std = self.config.initializer_range
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Parameter):
+            module.data.normal_(mean=0.0, std=std)
 
     def get_input_embeddings(self):
         return self.model.embed_tokens

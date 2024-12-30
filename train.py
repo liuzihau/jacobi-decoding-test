@@ -141,6 +141,8 @@ model = Qwen2JacobiForCausalLM.from_pretrained(
     torch_dtype="auto",
     device_map="auto"
 )
+model = model.to('cuda')
+model.init_trainable_weights(model.jacobi_weight)
 
 # freeze target model's parameter
 for param in model.model.parameters():
