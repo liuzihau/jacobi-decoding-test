@@ -39,7 +39,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.adapters = nn.ModuleList([nn.Linear((n+2)*attn_hidden_size, attn_hidden_size) for n in range(mix_sequences)])
         self.mix_sequences = mix_sequences
         
-        self.jacobi_weight = nn.Parameter(torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5).to(dtype=torch.bfloat16)        self.jacobi_token_nums = jacobi_token_nums
+        self.jacobi_weight = nn.Parameter(torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5).to(dtype=torch.bfloat16)        
+        self.jacobi_token_nums = jacobi_token_nums
 
         # for adapter in self.adapters:
             # self.init_weights(adapter)
@@ -305,7 +306,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         jacobi_hidden_states = []
         jacobi_logits = []
         # Iterate through the batch dimension
-        for i in range(inputs_embeds.shape[0]):
+        for i in range(hidden_states.shape[0]):
             replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
             replace_indices = replace_indices[:self.jacobi_token_nums]
             # lm_hidden_states = hidden_states[:, :-self.jacobi_token_nums, :]
