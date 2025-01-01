@@ -47,7 +47,7 @@ class CustomDataset(Dataset):
         attention_mask = [1] * (input_ids.shape[0] + self.jacobi_tokens)
         loss_mask = [0] * (input_ids.shape[0]) + [1] *self.jacobi_tokens
 
-        hidden_states = hidden_states[start_index:start_index+self.jacobi_tokens]
+        hidden_states = hidden_states[start_index+1:start_index+self.jacobi_tokens+1]
         if self.transform:
             hidden_states = self.transform(hidden_states)
 

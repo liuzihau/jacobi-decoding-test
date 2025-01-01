@@ -234,9 +234,9 @@ for epoch in range(num_epochs + 1):
                 print("top_3 tokens:")
                 for i, distribution in enumerate(target_head[0]):
                     top_3 = distribution.argsort(descending=True)[:3]
-                    print(f"<[{i}-1]{tokenizer.decode([distribution[0]])}>")
-                    print(f"<[{i}-2]{tokenizer.decode([distribution[1]])}>")
-                    print(f"<[{i}-3]{tokenizer.decode([distribution[2]])}>")
+                    print(f"<[{i}-1]{tokenizer.decode([top_3[0]])}>")
+                    print(f"<[{i}-2]{tokenizer.decode([top_3[1]])}>")
+                    print(f"<[{i}-3]{tokenizer.decode([top_3[2]])}>")
 
                 print(f"attn_mask len and sum: {data['attention_mask'].shape}, {data['attention_mask'].sum()}")
                 print(f"loss_mask len and index: {data['loss_mask'].shape}, {torch.nonzero(data['loss_mask'][0] == 1, as_tuple=True)[0]}")
