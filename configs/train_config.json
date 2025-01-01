@@ -7,7 +7,7 @@
     "config_path": "/content/EAGLE/eagle/train/llama_2_chat_7B_config.json",
     "cpdir": "/content/drive/MyDrive/EAGLE_weights",
     "jacobi_token_nums": 10,
-    "bs": 4,
+    "bs": 1,
     "lr": 3e-05,
     "gradient_accumulation_steps": 1,
     "is_warmup": true,

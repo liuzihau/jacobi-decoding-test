@@ -40,11 +40,11 @@ class CustomDataset(Dataset):
             generated_nums = self.max_len - input_nums
 
         start_limitation = generated_nums - self.jacobi_tokens - 2 
-        start_index = random.randint(0, start_limitation)
+        start_index = 33#random.randint(0, start_limitation)
         
         input_ids = torch.cat([input_ids, generated_tokens[:start_index]],dim=-1) if start_index > 0 else input_ids
         input_ids_target = generated_tokens[start_index+1:start_index+self.jacobi_tokens+1]
-        attention_mask = [1] * (input_ids.shape[0]) #  + self.jacobi_tokens)
+        attention_mask = [1] * (input_ids.shape[0] + self.jacobi_tokens)
         loss_mask = [0] * (input_ids.shape[0]) + [1] *self.jacobi_tokens
 
         hidden_states = hidden_states[start_index:start_index+self.jacobi_tokens]

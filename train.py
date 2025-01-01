@@ -13,7 +13,7 @@ from accelerate.utils import set_seed
 
 from data_processing import CustomDataset, DataCollatorWithPadding, list_files
 from models.qwen2.modeling_qwen2_jacobi import Qwen2JacobiForCausalLM
-from models.qwen2.tokenization_qwen2_fast import Qwen2TokenizerFast
+from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
 
 def top_accuracy(output, target, topk=(1,)):
@@ -112,6 +112,7 @@ def cllm_loss():
 
     return loss
 
+DEBUG = True
 CONFIG_PATH = '/content/jacobi-decoding-test/configs/train_config.json'
 PROJECT = 'Jacobi-test'
 GAMMA = 0.9
@@ -133,6 +134,7 @@ if accelerator.is_main_process:
     wandb.init(project=PROJECT, name=train_config["name"], config=train_config)
 
 baseconfig = AutoConfig.from_pretrained(train_config["basepath"])
+tokenizer = Qwen2Tokenizer.from_pretrained(train_config["basepath"], use_fast=False)
 
 # model = Qwen2ForCausalLM.from_pretrained(
 model = Qwen2JacobiForCausalLM.from_pretrained(
@@ -151,12 +153,22 @@ for param in model.model.parameters():
 datapath = list_files(train_config["datapath"])
 
 # data part
-traindatapath = datapath[:int(len(datapath) * 0.1)]
-testdatapath = datapath[int(len(datapath) * 0.1):int(len(datapath) * 0.15)]
+traindatapath = datapath[:int(len(datapath) * 0.95)]
+testdatapath = datapath[int(len(datapath) * 0.95):]
+
+shuffle_data = True
+if DEBUG:
+    shuffle_data = False
+    traindatapath = datapath[:4]
+    testdatapath = datapath[int(len(datapath) * 0.1):int(len(datapath) * 0.15)]
+    print(f"train data: {len(traindatapath)}")
+    print(f"test data: {len(testdatapath)}")
+
 
 traindataset = CustomDataset(traindatapath, jacobi_tokens=train_config["jacobi_token_nums"])
 testdataset = CustomDataset(testdatapath, jacobi_tokens=train_config["jacobi_token_nums"])
-train_loader = DataLoader(traindataset, batch_size=train_config["bs"], shuffle=True,
+
+train_loader = DataLoader(traindataset, batch_size=train_config["bs"], shuffle=shuffle_data,
                           collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"],
                           pin_memory=True)
 test_loader = DataLoader(testdataset, batch_size=train_config["bs"], shuffle=False,
@@ -165,9 +177,6 @@ test_loader = DataLoader(testdataset, batch_size=train_config["bs"], shuffle=Fal
 if accelerator.is_main_process:
     if not os.path.exists(train_config["cpdir"]):
         os.makedirs(train_config["cpdir"])
-
-# config = EConfig.from_pretrained(train_config["config_path"])
-# model = Model(config, load_emb=True, path=train_config["basepath"])
 
 criterion = nn.SmoothL1Loss(reduction="none")  
 optimizer = optim.AdamW(model.parameters(), lr=train_config["lr"], betas=(train_config["b1"], train_config["b2"]))
@@ -197,7 +206,6 @@ for epoch in range(num_epochs + 1):
     num_batches = 0
     model.train()
     for batch_idx, data in enumerate(tqdm(train_loader)):
-
         with accelerator.accumulate(model):
             optimizer.zero_grad()
             output = model(input_ids=data["input_ids"], 
@@ -210,6 +218,29 @@ for epoch in range(num_epochs + 1):
                 target_head = model.lm_head(data["hidden_state_target"])
                 target_head = target_head.detach()
             # loss_mask = data["loss_mask"][:, :, None]
+            if DEBUG:
+                print("="*30 + "DEBUG LOG" + "="*30)
+                
+                input_tokens = ""
+                for i, token in enumerate(data["input_ids"][0].tolist()):
+                    input_tokens += f"<[{i}]{tokenizer.decode([token])}>"
+                print(input_tokens)
+
+                target_tokens = ""
+                for i, token in enumerate(data["target"][0].tolist()):
+                    target_tokens += f"<[{i}]{tokenizer.decode([token])}>"
+                print(target_tokens)
+
+                print("top_3 tokens:")
+                for i, distribution in enumerate(target_head[0]):
+                    top_3 = distribution.argsort(descending=True)[:3]
+                    print(f"<[{i}-1]{tokenizer.decode([distribution[0]])}>")
+                    print(f"<[{i}-2]{tokenizer.decode([distribution[1]])}>")
+                    print(f"<[{i}-3]{tokenizer.decode([distribution[2]])}>")
+
+                print(f"attn_mask len and sum: {data['attention_mask'].shape}, {data['attention_mask'].sum()}")
+                print(f"loss_mask len and index: {data['loss_mask'].shape}, {torch.nonzero(data['loss_mask'][0] == 1, as_tuple=True)[0]}")
+
             vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion)#, loss_mask)
             loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
             # loss.backward()
