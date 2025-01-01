@@ -36,16 +36,17 @@ def top_accuracy(output, target, topk=(1,)):
     
 def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, criterion, loss_mask=None):
     # cross entropy -> sample distribution difference
-    target_p = nn.LogSoftmax(dim=2)(target_logits)
+    target_p = nn.Softmax(dim=2)(target_logits)
     out_logp = nn.LogSoftmax(dim=2)(jacobi_logits)
     plogp = target_p * out_logp
-    # ploss = -torch.sum(torch.sum(loss_mask * plogp, 2)) / (loss_mask.sum() + 1e-5)
-    ploss = -torch.sum(torch.sum(plogp, 2)) / (plogp.shape[1] + 1e-5)
+    plogp = -torch.sum(target_p * out_logp, dim=2)
+    ploss = -torch.sum(plogp) / (target_p.shape[0] * target_p.shape[1])  # Normalize by batch and sequence
 
     # regression -> hidden states difference
     vloss = criterion(jacobi_hidden_states, hidden_state_target)
-    # vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum() + 1e-5)
-    vloss = torch.sum(torch.mean(vloss, 2)) / (vloss.shape[1] + 1e-5)
+    vloss = torch.mean(vloss, dim=2)  # Shape: [batch, sequence]
+    vloss = torch.sum(vloss) / (vloss.shape[0] * vloss.shape[1] + 1e-5)
+    
     return vloss, ploss
 
 def cllm_loss():
