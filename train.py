@@ -39,7 +39,7 @@ def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacob
     target_p = nn.Softmax(dim=2)(target_logits)
     out_logp = nn.LogSoftmax(dim=2)(jacobi_logits)
     plogp = target_p * out_logp
-    ploss = -torch.sum(plogp) / (target_p.shape[0] * target_p.shape[1])  # Normalize by batch and sequence
+    ploss = -torch.sum(plogp) / (target_p.shape[0] * target_p.shape[1] + 1e-5)  # Normalize by batch and sequence
 
     # regression -> hidden states difference
     vloss = criterion(jacobi_hidden_states, hidden_state_target)
@@ -112,7 +112,6 @@ def cllm_loss():
 
     return loss
 
-DEBUG = True
 CONFIG_PATH = '/content/jacobi-decoding-test/configs/train_config.json'
 PROJECT = 'Jacobi-test'
 GAMMA = 0.9
@@ -157,13 +156,12 @@ traindatapath = datapath[:int(len(datapath) * 0.95)]
 testdatapath = datapath[int(len(datapath) * 0.95):]
 
 shuffle_data = True
-if DEBUG:
+if train_config["debug_mode"]:
     shuffle_data = False
     traindatapath = datapath[:4]
     testdatapath = datapath[int(len(datapath) * 0.1):int(len(datapath) * 0.15)]
     print(f"train data: {len(traindatapath)}")
     print(f"test data: {len(testdatapath)}")
-
 
 traindataset = CustomDataset(traindatapath, jacobi_tokens=train_config["jacobi_token_nums"])
 testdataset = CustomDataset(testdatapath, jacobi_tokens=train_config["jacobi_token_nums"])
@@ -198,6 +196,7 @@ else:
         model, optimizer, train_loader, test_loader
     )
 # accelerator.load_state("checkpoints/state_5")
+
 for epoch in range(num_epochs + 1):
     top_3acc = [[0 for _ in range(train_config["jacobi_token_nums"])] for _ in range(3)]
     correct = [0 for _ in range(train_config["jacobi_token_nums"])]
@@ -217,8 +216,8 @@ for epoch in range(num_epochs + 1):
             with torch.no_grad():
                 target_head = model.lm_head(data["hidden_state_target"])
                 target_head = target_head.detach()
-            # loss_mask = data["loss_mask"][:, :, None]
-            if DEBUG:
+            
+            if train_config["debug_mode"]:
                 print("="*30 + "DEBUG LOG" + "="*30)
                 
                 input_tokens = ""
@@ -255,56 +254,112 @@ for epoch in range(num_epochs + 1):
             _, target = torch.max(target_head, 2)
             ct = predicted.shape[0]
             cc = (predicted == target) 
-            # out_head = out_head.view(-1, target_head.shape[-1])[loss_mask.view(-1) == 1]
-            # target = target.view(-1)[loss_mask.view(-1) == 1]
+
             topkacc = top_accuracy(output['jacobi_logits'], target, (1, 2, 3))
-            for top_i in range(len(topkacc)):
-                for seq in range(len(top_3acc[top_i])):
-                    top_3acc[top_i][seq] += topkacc[top_i][seq]
+            for i, cor_seq in enumerate(topkacc):
+                for seq_id in range(len(cor_seq)):
+                    top_3acc[i][seq_id] += topkacc[i][seq_id]
             total += ct
-            for bs in range(cc.shape[0]):
-                for seq in range(len(correct)):
-                    correct[seq] += cc[bs, seq].float().item()
+
         if accelerator.is_main_process and ct != 0:
             logdict = {"train/lr": optimizer.optimizer.param_groups[0]["lr"], "train/vloss": vloss.item(),
                        "train/ploss": ploss.item(), "train/loss": loss.item(), "train/acc": cc / ct}
             for id, i in enumerate(top_3acc):
                 for seq in range(len(i)):
-                    logdict[f'train/top_{id + 1}_token_{seq}_acc'] = topkacc[id][seq].item() / ct
+                    logdict[f'train/top_{id + 1}_token_{seq}_acc'] = top_3acc[id][seq].item() / total
             wandb.log(logdict)
-            # for id,i in enumerate(top_3acc):
-            #     wandb.log({f'train/top_{id+1}_acc':topkacc[id].item()/ct})
 
         del ploss, vloss, target_head
         gc.collect()
         torch.cuda.empty_cache()
+
         epoch_loss += loss.item()
         num_batches += 1
 
         if train_config["debug_mode"] and batch_idx % 50 == 0:
             print(torch.cuda.memory_summary(device='cuda', abbreviated=True), flush=True)
 
+    epoch_loss /= num_batches
+    if accelerator.is_local_main_process:
+        print('Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
+        wandb.log({"train/epochloss": epoch_loss})
 
-    # correct, total = torch.tensor(correct).cuda(), torch.tensor(total).cuda()
-    # correct, total = accelerator.gather_for_metrics((correct, total))
-    # correct, total = correct.sum().item(), total.sum().item()
-    # epoch_loss /= num_batches
-    # top_3acc = accelerator.gather_for_metrics(top_3acc)
-    # if accelerator.is_local_main_process:
-    #     for id, i in enumerate(top_3acc):
-    #         wandb.log({f'train/epochtop_{id + 1}_acc': i.sum().item() / total})
-    # if accelerator.is_local_main_process:
-    #     print('Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
-    #     print('Train Accuracy: {:.2f}%'.format(100 * correct / total))
-    #     wandb.log({"train/epochacc": correct / total, "train/epochloss": epoch_loss})
+    # evaluation
+    if (epoch ) % train_config["save_freq"] == 0:
+        top_3acc = [[0 for _ in range(train_config["jacobi_token_nums"])] for _ in range(3)]
+        correct = [0 for _ in range(train_config["jacobi_token_nums"])]
+        total = 0
+        epoch_loss = 0
+        num_batches = 0
+        model.eval()
+        with torch.no_grad():
+            for batch_idx, data in enumerate(tqdm(test_loader)):
+                output = model(input_ids=data["input_ids"], 
+                            attention_mask=data["attention_mask"],
+                            loss_mask=data["loss_mask"],
+                            use_cache=False,
+                            output_hidden_states=True,
+                            return_dict=True)
+                
+                target_head = model.lm_head(data["hidden_state_target"])
+                target_head = target_head.detach()
+            
+                vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion)#, loss_mask)
+                loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
+            
+                _, predicted = torch.max(output['jacobi_logits'], 2)
+                _, target = torch.max(target_head, 2)
+                ct = predicted.shape[0]
+                cc = (predicted == target) 
 
-    # if (epoch + 1) % train_config["save_freq"] == 0:
+                topkacc = top_accuracy(output['jacobi_logits'], target, (1, 2, 3))
+                for i, cor_seq in enumerate(topkacc):
+                    for seq_id in range(len(cor_seq)):
+                        top_3acc[i][seq_id] += topkacc[i][seq_id]
+                total += ct
+
+            if accelerator.is_main_process and ct != 0:
+                logdict = {"test/vloss": vloss.item(), "test/ploss": ploss.item(), "test/loss": loss.item(), "test/acc": cc / ct}
+            for id, i in enumerate(top_3acc):
+                for seq in range(len(i)):
+                    logdict[f'test/top_{id + 1}_token_{seq}_acc'] = top_3acc[id][seq].item() / total
+            wandb.log(logdict)
+
+        del ploss, vloss, target_head
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        epoch_loss += loss.item()
+        num_batches += 1
+
+        epoch_loss /= num_batches
+        if accelerator.is_local_main_process:
+            print('Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
+            wandb.log({"test/epochloss": epoch_loss})
+
+            accelerator.save_state(output_dir=f"{train_config['cpdir']}/{train_config['name']}/state_{epoch}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     #     top_3acc = [0 for _ in range(3)]
     #     correct = 0
     #     total = 0
     #     epoch_loss = 0
     #     num_batches = 0
-    #     model.eval()
+        # model.eval()
 
     #     k_acc = [[] for i in range(5)]
     #     for batch_idx, data in enumerate(tqdm(test_loader)):
@@ -368,4 +423,3 @@ for epoch in range(num_epochs + 1):
     #             os.mkdir(train_config['cpdir'])
     #         if not os.path.exists(f"{train_config['cpdir']}/{train_config['name']}"):
     #             os.mkdir(f"{train_config['cpdir']}/{train_config['name']}")
-    #         accelerator.save_state(output_dir=f"{train_config['cpdir']}/{train_config['name']}/state_{epoch}")
