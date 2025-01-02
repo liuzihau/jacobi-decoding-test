@@ -22,26 +22,69 @@ class JacobiCausalLMOutputWithPast(ModelOutput):
     jacobi_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
 
+
+class Qwen2MLP(nn.Module):
+    def __init__(self, input_size, output_size, intermediate_size=None):
+        super().__init__()
+        self.input_size = input_size
+        self.intermediate_size = intermediate_size if intermediate_size is not None else input_size * 2
+        self.hidden_size = output_size
+        self.gate_proj = nn.Linear(self.input_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.input_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.act_fn = nn.SiLU()
+
+    def forward(self, hidden_state):
+        return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
+
+class ProjectionQwen2MLP(nn.Module):
+    def __init__(self, input_size, output_size, intermediate_size=None, layers=1):
+        super().__init__()
+        self.module_list = nn.ModuleList([Qwen2MLP(input_size, output_size, intermediate_size) for _ in range(layers)])
+    
+    def forward(self, hidden_state, idx):
+        return self.module_list[idx](hidden_state) 
+           
+class ProjectionLinear(nn.Module):
+    def __init__(self, input_size, output_size, layers):
+        super().__init__()
+        self.module_list = nn.ModuleList([nn.Linear(input_size, output_size) for _ in range(layers)])
+    
+    def forward(self, hidden_state, idx):
+        return self.module_list[idx](hidden_state)
+
 class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     
-    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4):
+    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4, adapter_type='Linear', shared_adapter=True, shared_jacobi_token=True):
         super().__init__(config)
         self.confg = config
         self.model = Qwen2Model(config)
         self.vocab_size = config.vocab_size
+        self.mix_sequences = mix_sequences
+        self.proj_freq = proj_freq
+        
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
+        
         attn_hidden_size = config.hidden_size
         attn_layers = config.num_hidden_layers
 
-        self.adapters = nn.ModuleList([nn.Linear((n+2)*attn_hidden_size, attn_hidden_size) for n in range(mix_sequences)])
-        self.mix_sequences = mix_sequences
-        self.proj_freq = proj_freq
-
+        if adapter_type == "Linear":
+            adapter_module = ProjectionLinear
+        elif adapter_type == 'Qwen2MLP':
+            adapter_module = ProjectionQwen2MLP
+        else:
+            raise NotImplementedError(f"{adapter_type} hasn't been implemented")
+        
+        self.shared_adapter = shared_adapter
+        if self.shared_adapter:
+            adapter_layers = 1
+        else:
+            adapter_layers = attn_layers // self.proj_freq
+        self.adapters = nn.ModuleList([adapter_module((n+2)*attn_hidden_size, attn_hidden_size, layers=adapter_layers) for n in range(mix_sequences)])
+        
         temp_weight = torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5
-        temp_weight = temp_weight.to(dtype=torch.bfloat16)  # can be remove?
         self.jacobi_weight = nn.Parameter(temp_weight)
    
         self.jacobi_token_nums = jacobi_token_nums
@@ -145,14 +188,18 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             for i in range(self.mix_sequences):
                 prev_states = target_states[:, -(self.jacobi_token_nums+i+1):-(i+1), :]
                 curr_states = torch.cat([curr_states, prev_states], dim=-1)
-                if new_states is None:
-                    new_states = self.adapters[i](curr_states)
+                if self.shared_adapter:
+                    adapter_idx = 0
                 else:
-                    new_states += self.adapters[i](curr_states)
+                    adapter_idx = layer_idx // self.proj_freq
+                if new_states is None:
+                    new_states = self.adapters[i](curr_states, adapter_idx)
+                else:
+                    new_states += self.adapters[i](curr_states, adapter_idx)
             new_states /= self.mix_sequences
 
             for i in range(hidden_states.shape[0]):
-                replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]  # (dim_0_seq, dim_1_seq)
+                replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
                 hidden_states[i, replace_indices] = new_states[i]
 
         outputs = (hidden_states,)

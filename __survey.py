@@ -23,6 +23,11 @@ def count_trainable_parameters(model):
 model = Qwen2JacobiForCausalLM.from_pretrained(
     "./Qwen2.5-0.5B-Instruct",
     10,
+    1,
+    4,
+    "Qwen2MLP",
+    False,
+    True,
     torch_dtype="auto",
     device_map="auto"
 )
@@ -35,3 +40,5 @@ for param in model.model.parameters():
 # Assuming `model` is your PyTorch model
 total_params = count_trainable_parameters(model)
 print(f"Total trainable parameters: {total_params}")
+
+# print(model)
