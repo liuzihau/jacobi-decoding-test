@@ -85,6 +85,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.adapters = nn.ModuleList([adapter_module((n+2)*attn_hidden_size, attn_hidden_size, layers=adapter_layers) for n in range(mix_sequences)])
         
         temp_weight = torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5
+        temp_weight = temp_weight.to(dtype=torch.bfloat16)  # can be remove?
+
         self.jacobi_weight = nn.Parameter(temp_weight)
    
         self.jacobi_token_nums = jacobi_token_nums

@@ -137,7 +137,7 @@ tokenizer = Qwen2Tokenizer.from_pretrained(train_config["basepath"], use_fast=Fa
 
 # model = Qwen2ForCausalLM.from_pretrained(
 model = Qwen2JacobiForCausalLM.from_pretrained(
-    config=train_config["basepath"],
+    pretrained_model_name_or_path=train_config["basepath"],
     jacobi_token_nums=train_config["jacobi_token_nums"],
     mix_sequences=train_config["mix_sequences"],
     proj_freq=train_config["projection_frequency"],
