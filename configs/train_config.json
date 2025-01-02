@@ -13,7 +13,7 @@
     "is_warmup": true,
     "num_epochs": 2,
     "num_warmup_steps": 500,
-    "total_steps": 88000,
+    "total_steps": 45000,
     "p_w": 0.2,
     "v_w": 1.0,
     "head_w": 0.1,

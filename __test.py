@@ -10,19 +10,19 @@ Test jacobi token shape
 """
 test top accuracy function
 """
-output = torch.randn(4, 10, 128)
-target = torch.randint(0, 127, (4, 10))
-_, pred = output.topk(3, 2, True, True)
-print(pred.shape)
-print(target.shape)
-correct = pred.eq(target.view(4, 10, -1).expand_as(pred))
-print(correct.float().sum(0).sum(-1).shape)
+# output = torch.randn(4, 10, 128)
+# target = torch.randint(0, 127, (4, 10))
+# _, pred = output.topk(3, 2, True, True)
+# print(pred.shape)
+# print(target.shape)
+# correct = pred.eq(target.view(4, 10, -1).expand_as(pred))
+# print(correct.float().sum(0).sum(-1).shape)
 
-res = []
-for k in [1, 2, 3]:
-    correct_k = correct[:, :, :k].float().sum(0).sum(-1)
-    res.append(correct_k)
-print(res)
+# res = []
+# for k in [1, 2, 3]:
+#     correct_k = correct[:, :, :k].float().sum(0).sum(-1)
+#     res.append(correct_k)
+# print(res)
 
 
 """
@@ -64,21 +64,23 @@ Test input data correct or not
 #         break
 
 
+mix_sequence = 1
+hidden_states = torch.randn((2, 24, 4))
+loss_mask = torch.Tensor([
+    [0] * 10 + [1] * 5 + [0] * 9,
+    [0] * 19 + [1] * 5
+])
 
-def top_accuracy(output, target, topk=(1,)):
-    # output.shape (bs, num_classes), target.shape (bs, )
-    """Computes the accuracy over the k top predictions for the specified values of k"""
+# replace_matrix = []
+# for i in range(loss_mask.shape[0]):
+#     replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
+#     all_indices = torch.cat([replace_indices[:mix_sequence] - mix_sequence, replace_indices], dim=-1)
+#     replace_matrix.append(hidden_states[i, all_indices])
+# replace_matrix = torch.stack(replace_matrix, 0)
+# print(hidden_states)
+# print(replace_matrix.shape)
 
-    with torch.no_grad():
-        maxk = max(topk)
-        batch_size = target.size(0)
-        seq_size = target.size(1)
-        _, pred = output.topk(maxk, -1, True, True)  # bs, seq, topk ex [4, 10, 3]
-        # pred = pred.t()
-        correct = pred.eq(target.view(batch_size, seq_size, -1).expand_as(pred))
 
-        res = []
-        for k in topk:
-            correct_k = correct[:, :, :k].float().sum(0).sum(-1)
-            res.append(correct_k)
-        return res
+replace_indices = torch.nonzero(loss_mask == 1, as_tuple=True)
+# all_indices = torch.cat([replace_indices[:mix_sequence] - mix_sequence, replace_indices], dim=-1)
+print(replace_indices)

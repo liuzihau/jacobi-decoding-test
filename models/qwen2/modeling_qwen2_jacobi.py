@@ -26,7 +26,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     
-    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1):
+    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4):
         super().__init__(config)
         self.confg = config
         self.model = Qwen2Model(config)
@@ -38,8 +38,9 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         self.adapters = nn.ModuleList([nn.Linear((n+2)*attn_hidden_size, attn_hidden_size) for n in range(mix_sequences)])
         self.mix_sequences = mix_sequences
-        
-        temp_weight = torch.ones((attn_hidden_size,), device='cuda', dtype=torch.float32) * 1e-5
+        self.proj_freq = proj_freq
+
+        temp_weight = torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5
         temp_weight = temp_weight.to(dtype=torch.bfloat16)  # can be remove?
         self.jacobi_weight = nn.Parameter(temp_weight)
    
@@ -103,7 +104,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         #     jacobi_sequence = self.jacobi_weight.unsqueeze(0).unsqueeze(0).repeat(inputs_embeds.shape[0], self.jacobi_token_nums, 1)
         #     return torch.cat([inputs_embeds, jacobi_sequence], dim=1)
     
-    def run_decoder_layer_with_previous_hidden_proj(self, decoder_layer, hidden_states, causal_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings):
+    def run_decoder_layer_with_previous_hidden_proj(self, decoder_layer, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings):
         residual = hidden_states
 
         hidden_states = decoder_layer.input_layernorm(hidden_states)
@@ -130,21 +131,28 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         
         # previous token projection
         layer_idx = decoder_layer.self_attn.layer_idx
-        if layer_idx % 4 == 0 and layer_idx > 0:
-            target_states = hidden_states[:, -(self.jacobi_token_nums+self.mix_sequences):, :]
+        if (layer_idx + 1) % self.proj_freq == 0:
+            target_states = []
+            for i in range(hidden_states.shape[0]):
+                replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
+                prev_seq_indices = replace_indices[:self.mix_sequences] - self.mix_sequences
+                all_indices = torch.cat([prev_seq_indices, replace_indices], dim=-1)
+                target_states.append(hidden_states[i, all_indices])
+            target_states = torch.stack(target_states, dim=0)  # [bs, jacobi + mix_seq, hidden_dim]
+            
             curr_states = target_states[:, -self.jacobi_token_nums:, :]
             new_states = None
             for i in range(self.mix_sequences):
                 prev_states = target_states[:, -(self.jacobi_token_nums+i+1):-(i+1), :]
                 curr_states = torch.cat([curr_states, prev_states], dim=-1)
-                
                 if new_states is None:
                     new_states = self.adapters[i](curr_states)
                 else:
                     new_states += self.adapters[i](curr_states)
-
             new_states /= self.mix_sequences
-            hidden_states = torch.cat([hidden_states[:, :-self.jacobi_token_nums, :], new_states], dim=-2)
+
+            replace_indices = torch.nonzero(loss_mask == 1, as_tuple=True)  # (dim_0_seq, dim_1_seq)
+            hidden_states[replace_indices] = new_states
 
         outputs = (hidden_states,)
         if output_attentions:
@@ -155,7 +163,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         return outputs
 
-    def run_decoder_layers_with_jacobi_tokens(self, hidden_states, causal_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings, output_hidden_states):
+    def run_decoder_layers_with_jacobi_tokens(self, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings, output_hidden_states):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
@@ -167,6 +175,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 decoder_layer=decoder_layer,
                 hidden_states=hidden_states,
                 causal_mask=causal_mask,
+                loss_mask=loss_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 output_attentions=output_attentions,
@@ -206,14 +215,14 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
         # Qwen2Model forward
-        output_attentions, output_hidden_states, return_dict, use_cache, return_legacy_cache = self.model.get_pre_setting(input_ids, 
-                                                                                                                          past_key_values, 
-                                                                                                                          inputs_embeds, 
-                                                                                                                          use_cache, 
-                                                                                                                          output_attentions, 
-                                                                                                                          output_hidden_states, 
-                                                                                                                          return_dict)
-        inputs_embeds = self.model.run_embedding(input_ids, inputs_embeds)
+        output_attentions, output_hidden_states, return_dict, use_cache, return_legacy_cache = self.model.get_pre_setting(input_ids=input_ids, 
+                                                                                                                          past_key_values=past_key_values, 
+                                                                                                                          inputs_embeds=inputs_embeds, 
+                                                                                                                          use_cache=use_cache, 
+                                                                                                                          output_attentions=output_attentions, 
+                                                                                                                          output_hidden_states=output_hidden_states, 
+                                                                                                                          return_dict=return_dict)
+        inputs_embeds = self.model.run_embedding(input_ids=input_ids, inputs_embeds=inputs_embeds)
 
         # insert jacobi tokens
         inputs_embeds = self.merge_with_jacobi_tokens(inputs_embeds, loss_mask)
@@ -241,7 +250,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         # decoder layers with jacobi tokens
         hidden_states, all_hidden_states, next_decoder_cache, all_self_attns = self.run_decoder_layers_with_jacobi_tokens(hidden_states=hidden_states, 
-                                                                                                                          causal_mask=causal_mask, 
+                                                                                                                          causal_mask=causal_mask,
+                                                                                                                          loss_mask=loss_mask, 
                                                                                                                           position_ids=position_ids, 
                                                                                                                           past_key_values=past_key_values, 
                                                                                                                           output_attentions=output_attentions, 
