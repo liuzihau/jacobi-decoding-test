@@ -151,8 +151,9 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                     new_states += self.adapters[i](curr_states)
             new_states /= self.mix_sequences
 
-            replace_indices = torch.nonzero(loss_mask == 1, as_tuple=True)  # (dim_0_seq, dim_1_seq)
-            hidden_states[replace_indices] = new_states
+            for i in range(hidden_states.shape[0]):
+                replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]  # (dim_0_seq, dim_1_seq)
+                hidden_states[i, replace_indices] = new_states[i]
 
         outputs = (hidden_states,)
         if output_attentions:
