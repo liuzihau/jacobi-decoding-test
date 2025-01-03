@@ -243,7 +243,7 @@ for epoch in range(num_epochs + 1):
                     for i, distribution in enumerate(output['jacobi_logits'][bs_num]):
                         print("top_3 tokens of batch {bs_num}:")
                         top_3 = distribution.argsort(descending=True)[:3]
-                        print(f"<[{i}-Target]{data["target"][bs_num][i]}<[{i}-1]{tokenizer.decode([top_3[0]])}>, <[{i}-2]{tokenizer.decode([top_3[1]])}>, <[{i}-3]{tokenizer.decode([top_3[2]])}>")
+                        print(f"<[{i}-Target]{data['target'][bs_num][i]}<[{i}-1]{tokenizer.decode([top_3[0]])}>, <[{i}-2]{tokenizer.decode([top_3[1]])}>, <[{i}-3]{tokenizer.decode([top_3[2]])}>")
 
             vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion)#, loss_mask)
             loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
