@@ -2,6 +2,7 @@ import os
 import gc
 import json
 from tqdm import tqdm
+import wandb
 
 import torch
 from torch.utils.data import DataLoader
@@ -124,18 +125,13 @@ set_seed(0)
 
 torch.backends.cuda.matmul.allow_tf32 = True
 
-accelerator = Accelerator(mixed_precision='bf16',
-                          gradient_accumulation_steps=train_config["gradient_accumulation_steps"])
+accelerator = Accelerator(mixed_precision='bf16', gradient_accumulation_steps=train_config["gradient_accumulation_steps"])
 
 if accelerator.is_main_process:
-    import wandb
     wandb.login(key=train_config["api_key"])
     wandb.init(project=PROJECT, name=train_config["name"], config=train_config)
 
-baseconfig = AutoConfig.from_pretrained(train_config["basepath"])
 tokenizer = Qwen2Tokenizer.from_pretrained(train_config["basepath"], use_fast=False)
-
-# model = Qwen2ForCausalLM.from_pretrained(
 model = Qwen2JacobiForCausalLM.from_pretrained(
     pretrained_model_name_or_path=train_config["basepath"],
     jacobi_token_nums=train_config["jacobi_token_nums"],
@@ -148,15 +144,12 @@ model = Qwen2JacobiForCausalLM.from_pretrained(
     device_map="auto"
 )
 model = model.to('cuda')
-model.init_trainable_weights(model.jacobi_weight)
-
-# freeze target model's parameter
 for param in model.model.parameters():
     param.requires_grad = False
-
-datapath = list_files(train_config["datapath"])
+model.init_trainable_weights(model.jacobi_weight)
 
 # data part
+datapath = list_files(train_config["datapath"])
 traindatapath = datapath[:int(len(datapath) * 0.95)]
 testdatapath = datapath[int(len(datapath) * 0.95):]
 
@@ -188,7 +181,8 @@ num_epochs = train_config["num_epochs"]
 num_warmup_steps = train_config["num_warmup_steps"]
 total_steps = train_config["total_steps"]
 is_warmup = train_config["is_warmup"]
-
+jacobi_token_nums = train_config["jacobi_token_nums"]
+debug_mode = train_config["debug_mode"]
 if is_warmup:
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps,
                                                 num_training_steps=total_steps)
@@ -200,11 +194,10 @@ else:
     model, optimizer, train_loader, test_loader = accelerator.prepare(
         model, optimizer, train_loader, test_loader
     )
-# accelerator.load_state("checkpoints/state_5")
 
 for epoch in range(num_epochs + 1):
-    top_3acc = [[0 for _ in range(train_config["jacobi_token_nums"])] for _ in range(3)]
-    correct = [0 for _ in range(train_config["jacobi_token_nums"])]
+    top_3acc = [[0 for _ in range(jacobi_token_nums)] for _ in range(3)]
+    correct = [0 for _ in range(jacobi_token_nums)]
     total = 0
     epoch_loss = 0
     num_batches = 0
@@ -222,7 +215,7 @@ for epoch in range(num_epochs + 1):
                 target_head = model.lm_head(data["hidden_state_target"])
                 target_head = target_head.detach()
             
-            if train_config["debug_mode"]:
+            if debug_mode:
                 print("="*30 + "DEBUG LOG" + "="*30)
                 
                 input_tokens = ""
@@ -244,6 +237,13 @@ for epoch in range(num_epochs + 1):
 
                 print(f"attn_mask len and sum: {data['attention_mask'].shape}, {data['attention_mask'].sum()}")
                 print(f"loss_mask len and index: {data['loss_mask'].shape}, {torch.nonzero(data['loss_mask'][0] == 1, as_tuple=True)[0]}")
+
+            if batch_idx % 50 == 0:
+                for bs_num in range(target_head.shape[0]):
+                    for i, distribution in enumerate(output['jacobi_logits'][bs_num]):
+                        print("top_3 tokens of batch {bs_num}:")
+                        top_3 = distribution.argsort(descending=True)[:3]
+                        print(f"<[{i}-Target]{data["target"][bs_num][i]}<[{i}-1]{tokenizer.decode([top_3[0]])}>, <[{i}-2]{tokenizer.decode([top_3[1]])}>, <[{i}-3]{tokenizer.decode([top_3[2]])}>")
 
             vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion)#, loss_mask)
             loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
@@ -281,7 +281,7 @@ for epoch in range(num_epochs + 1):
         epoch_loss += loss.item()
         num_batches += 1
 
-        if train_config["debug_mode"] and batch_idx % 50 == 0:
+        if debug_mode and batch_idx % 500 == 0:
             print(torch.cuda.memory_summary(device='cuda', abbreviated=True), flush=True)
 
     epoch_loss /= num_batches
