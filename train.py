@@ -120,7 +120,7 @@ GAMMA = 0.9
 with open(CONFIG_PATH, 'r') as f:
     train_config = json.loads(f.read())
 
-with open(train_config["basepath"], 'r') as f:
+with open(f"{train_config['basepath']}/config.json", 'r') as f:
     model_config = json.loads(f.read())
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
@@ -206,7 +206,7 @@ for epoch in range(num_epochs + 1):
     epoch_loss = 0
     num_batches = 0
     model.train()
-    counts = torch.zeros((jacobi_token_nums, model_config['vocal_size']), dtype=torch.int32)
+    counts = torch.zeros((jacobi_token_nums, model_config['vocab_size']), dtype=torch.int32)
     for batch_idx, data in enumerate(tqdm(train_loader)):
         with accelerator.accumulate(model):
             optimizer.zero_grad()
