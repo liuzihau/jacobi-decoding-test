@@ -1,44 +1,52 @@
+from tqdm import tqdm
+
+import torch
+from torch.utils.data import DataLoader
+
+from data_processing import CustomDataset, DataCollatorWithPadding, list_files
 from models.qwen2.modeling_qwen2_jacobi import Qwen2JacobiForCausalLM
-from models.qwen2.tokenization_qwen2_fast import Qwen2TokenizerFast
-
-# model_name = "./Qwen2.5-0.5B-Instruct"
-# # model = Qwen2ForCausalLM.from_pretrained(
-# model = Qwen2JacobiForCausalLM.from_pretrained(
-#     model_name,
-#     torch_dtype="auto",
-#     device_map="auto"
-# )
-# tokenizer = Qwen2TokenizerFast.from_pretrained(model_name)
-
-# for name, param in model.named_parameters():
-#     print(f"Name: {name}, Shape: {param.shape}, Requires Grad: {param.requires_grad}")
+from models.qwen2.tokenization_qwen2_fast import Qwen2Tokenizer
 
 
+def survey_total_trainable_parameters(pretrained_model_name_or_path="./Qwen2.5-0.5B-Instruct", jacobi_token_nums=10, mix_sequences=1, proj_freq=4, adapter_type='Qwen2MLP', shared_adapter=False, shared_jacobi_token=True):
+    
+    def count_trainable_parameters(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-import json
+    model = Qwen2JacobiForCausalLM.from_pretrained(pretrained_model_name_or_path, jacobi_token_nums, mix_sequences, proj_freq, adapter_type, shared_adapter, shared_jacobi_token, torch_dtype="auto", device_map="auto")
+    for param in model.model.parameters():
+        param.requires_grad = False
 
-def count_trainable_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = count_trainable_parameters(model)
+    print(f"Total trainable parameters: {total_params}")
+    return total_params
 
-model = Qwen2JacobiForCausalLM.from_pretrained(
-    "./Qwen2.5-0.5B-Instruct",
-    10,
-    1,
-    4,
-    "Qwen2MLP",
-    False,
-    True,
-    torch_dtype="auto",
-    device_map="auto"
-)
 
-# freeze target model's parameter
-for param in model.model.parameters():
-    param.requires_grad = False
+def survey_training_data_token_distribution(pretrained_model_name_or_path="./Qwen2.5-0.5B-Instruct", datapath='./data_root/ShareGPT_Vicuna_unfiltered_Qwen2.5-0.5B-Instruct', jacobi_tokens=10, batch_size=2, vocal_dim=151936):
+    datapath = list_files(datapath)
+    custom_dataset = CustomDataset(datapath, jacobi_tokens=jacobi_tokens)
+    data_loader = DataLoader(custom_dataset, batch_size=batch_size, shuffle=False,
+                         collate_fn=DataCollatorWithPadding(), num_workers=0, pin_memory=True)
+    
+    tokenizer = Qwen2Tokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=False)
+    counts = torch.zeros((vocal_dim,),dtype=torch.int16)
+    print(counts.shape)
+    for batch_idx, data in enumerate(tqdm(data_loader)):
+        flattened_data = data['target'].flatten()
+        c = torch.bincount(flattened_data)
+        ids = torch.nonzero(c, as_tuple=True)[0]
+        counts[ids] += c[ids]
+        if (batch_idx + 1) % 1000 == 0:
+            report = f"[{batch_idx + 1:5d}] "
+            top_5 = counts.argsort(descending=True)[:5]
+            for i, token in enumerate(top_5):
+                decode = tokenizer.decode([token])
+                decode = "\\n" if decode == '\n' else decode
+                report += f"<top {i+1}: {decode}({counts[token]} times)>, "
+            print(report)
+    # print(counts[torch.nonzero(counts, as_tuple=True)[0]])
+    return counts
 
-# Example usage:
-# Assuming `model` is your PyTorch model
-total_params = count_trainable_parameters(model)
-print(f"Total trainable parameters: {total_params}")
-
-# print(model)
+if __name__ == "__main__":
+    # survey_total_trainable_parameters()
+    survey_training_data_token_distribution()
