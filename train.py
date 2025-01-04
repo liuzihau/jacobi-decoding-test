@@ -206,7 +206,7 @@ for epoch in range(num_epochs + 1):
     epoch_loss = 0
     num_batches = 0
     model.train()
-    counts = torch.zeros((jacobi_token_nums, model_config['vocab_size']), dtype=torch.int32)
+    counts = torch.zeros((jacobi_token_nums, model_config['vocab_size']), dtype=torch.int32).to(model.device)
     for batch_idx, data in enumerate(tqdm(train_loader)):
         with accelerator.accumulate(model):
             optimizer.zero_grad()
@@ -264,14 +264,14 @@ for epoch in range(num_epochs + 1):
                             decode = "\\n" if decode == '\n' else decode
                             report += f"<[{i}-{idx+1}]{decode}>, "
                         print(report)
-                top_5 = counts.argsort(dim=-1, descending=True)[:5]
-                report = f"[{batch_idx}]\n"
+                top_5 = counts.argsort(dim=-1, descending=True)[:, :5]
+                report = f"[batch {batch_idx}] most freq predict tokens:\n"
                 for seq_id, seq_data in enumerate(top_5):
                     report += f"[token {seq_id}] "
                     for i, token in enumerate(seq_data):
                         decode = tokenizer.decode([token])
                         decode = "\\n" if decode == '\n' else decode
-                        report += f"<top {i+1}: {decode}({counts[token]} times)>, "
+                        report += f"<top {i+1}: {decode}({seq_data[token]} times)>, "
                     report = report[:-2] + "\n"
                 print(report)
 
