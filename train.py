@@ -244,7 +244,7 @@ for epoch in range(num_epochs + 1):
                 print(f"loss_mask len and index: {data['loss_mask'].shape}, {torch.nonzero(data['loss_mask'][0] == 1, as_tuple=True)[0]}")
 
             # record total generated top_3 tokens
-            top_3 = output['jacobi_logits'].argsort(dim=-1, descending=True)[:3]
+            top_3 = output['jacobi_logits'].argsort(dim=-1, descending=True)[:, :, :3]
             top_3 = top_3.permute(1, 0, 2).reshape(jacobi_token_nums, -1)
             for seq_idx, ith_data in enumerate(top_3):
                 c = torch.bincount(ith_data)

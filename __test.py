@@ -86,7 +86,25 @@ Test input data correct or not
 # print(replace_indices)
 
 
-
-a = torch.arange(60).reshape(2, 10, 3)
+counts = torch.zeros((10, 20))
+a = torch.randint(0, 60, (180,)).reshape(2, 10, 9)
 print(a)
-print(a.reshape(10, -1))
+b = a.argsort(descending=True, dim=-1)[:, :, :3]
+print(b)
+c = b.permute(1, 0, 2).reshape(10, -1)
+print(c)
+for seq_idx, ith_data in enumerate(c):
+    e = torch.bincount(ith_data)
+    ids = torch.nonzero(e, as_tuple=True)[0]
+    counts[seq_idx, ids] += e[ids]
+print(counts)
+
+
+top_5 = counts.argsort(dim=-1, descending=True)[:, :5]
+report = f""
+for seq_id, seq_data in enumerate(top_5):
+    report += f"[token {seq_id}] "
+    for i, token in enumerate(seq_data):
+        report += f"<top {i+1}: {token}({counts[seq_id, token]} times)>, "
+    report = report[:-2] + "\n"
+print(report)
