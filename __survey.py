@@ -30,13 +30,12 @@ def survey_training_data_token_distribution(pretrained_model_name_or_path="./Qwe
     
     tokenizer = Qwen2Tokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=False)
     counts = torch.zeros((vocal_dim,),dtype=torch.int16)
-    print(counts.shape)
     for batch_idx, data in enumerate(tqdm(data_loader)):
         flattened_data = data['target'].flatten()
         c = torch.bincount(flattened_data)
         ids = torch.nonzero(c, as_tuple=True)[0]
         counts[ids] += c[ids]
-        if (batch_idx + 1) % 1000 == 0:
+        if (batch_idx + 1) % 1 == 0:
             report = f"[{batch_idx + 1:5d}] "
             top_5 = counts.argsort(descending=True)[:5]
             for i, token in enumerate(top_5):
@@ -44,9 +43,14 @@ def survey_training_data_token_distribution(pretrained_model_name_or_path="./Qwe
                 decode = "\\n" if decode == '\n' else decode
                 report += f"<top {i+1}: {decode}({counts[token]} times)>, "
             print(report)
-    # print(counts[torch.nonzero(counts, as_tuple=True)[0]])
+    torch.save(counts, "./counts.pt")
     return counts
+
+def load():
+    x = torch.load('./counts.pt')
+    print(x.shape)
 
 if __name__ == "__main__":
     # survey_total_trainable_parameters()
-    survey_training_data_token_distribution()
+    counts = survey_training_data_token_distribution()
+    
