@@ -64,12 +64,12 @@ Test input data correct or not
 #         break
 
 
-mix_sequence = 1
-hidden_states = torch.randn((2, 24, 4))
-loss_mask = torch.Tensor([
-    [0] * 10 + [1] * 5 + [0] * 9,
-    [0] * 19 + [1] * 5
-])
+# mix_sequence = 1
+# hidden_states = torch.randn((2, 24, 4))
+# loss_mask = torch.Tensor([
+#     [0] * 10 + [1] * 5 + [0] * 9,
+#     [0] * 19 + [1] * 5
+# ])
 
 # replace_matrix = []
 # for i in range(loss_mask.shape[0]):
@@ -81,6 +81,12 @@ loss_mask = torch.Tensor([
 # print(replace_matrix.shape)
 
 
-replace_indices = torch.nonzero(loss_mask == 1, as_tuple=True)
-# all_indices = torch.cat([replace_indices[:mix_sequence] - mix_sequence, replace_indices], dim=-1)
-print(replace_indices)
+# replace_indices = torch.nonzero(loss_mask == 1, as_tuple=True)
+# # all_indices = torch.cat([replace_indices[:mix_sequence] - mix_sequence, replace_indices], dim=-1)
+# print(replace_indices)
+
+
+
+a = torch.arange(60).reshape(2, 10, 3)
+print(a)
+print(a.reshape(10, -1))

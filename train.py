@@ -245,7 +245,7 @@ for epoch in range(num_epochs + 1):
 
             # record total generated top_3 tokens
             top_3 = output['jacobi_logits'].argsort(dim=-1, descending=True)[:3]
-            top_3 = top_3.reshape(jacobi_token_nums, -1)
+            top_3 = top_3.permute(1, 0, 2).reshape(jacobi_token_nums, -1)
             for seq_idx, ith_data in enumerate(top_3):
                 c = torch.bincount(ith_data)
                 ids = torch.nonzero(c, as_tuple=True)[0]
