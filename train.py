@@ -271,7 +271,7 @@ for epoch in range(num_epochs + 1):
                     for i, token in enumerate(seq_data):
                         decode = tokenizer.decode([token])
                         decode = "\\n" if decode == '\n' else decode
-                        report += f"<top {i+1}: {decode}({seq_data[token]} times)>, "
+                        report += f"<top {i+1}: {decode}({counts[seq_id, token]} times)>, "
                     report = report[:-2] + "\n"
                 print(report)
 
