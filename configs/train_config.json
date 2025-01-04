@@ -1,5 +1,5 @@
 {
-    "name": "CFG4",
+    "name": "CFG5",
     "api_key": "",
     "basepath_local": "./Qwen2.5-0.5B-Instruct",
     "basepath":"/content/drive/MyDrive/LLMs_weight/qwen/checkpoints/Qwen2.5-0.5B-Instruct",
@@ -9,7 +9,7 @@
     "jacobi_token_nums": 2,
     "mix_sequences": 1,
     "projection_frequency": 4,
-    "adapter_type": "Linear",
+    "adapter_type": "Qwen2MLP",
     "shared_adapter": false,
     "shared_jacobi_token": true,
     "bs": 2,

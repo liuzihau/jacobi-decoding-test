@@ -120,6 +120,9 @@ GAMMA = 0.9
 with open(CONFIG_PATH, 'r') as f:
     train_config = json.loads(f.read())
 
+with open(train_config["basepath"], 'r') as f:
+    model_config = json.loads(f.read())
+
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 set_seed(0)
 
@@ -195,6 +198,7 @@ else:
         model, optimizer, train_loader, test_loader
     )
 
+epoch_counts = []
 for epoch in range(num_epochs + 1):
     top_3acc = [[0 for _ in range(jacobi_token_nums)] for _ in range(3)]
     correct = [0 for _ in range(jacobi_token_nums)]
@@ -202,6 +206,7 @@ for epoch in range(num_epochs + 1):
     epoch_loss = 0
     num_batches = 0
     model.train()
+    counts = torch.zeros((jacobi_token_nums, model_config['vocal_size']), dtype=torch.int32)
     for batch_idx, data in enumerate(tqdm(train_loader)):
         with accelerator.accumulate(model):
             optimizer.zero_grad()
@@ -238,13 +243,37 @@ for epoch in range(num_epochs + 1):
                 print(f"attn_mask len and sum: {data['attention_mask'].shape}, {data['attention_mask'].sum()}")
                 print(f"loss_mask len and index: {data['loss_mask'].shape}, {torch.nonzero(data['loss_mask'][0] == 1, as_tuple=True)[0]}")
 
-            if batch_idx % 50 == 0:
+            # record total generated top_3 tokens
+            top_3 = output['jacobi_logits'].argsort(dim=-1, descending=True)[:3]
+            top_3 = top_3.reshape(jacobi_token_nums, -1)
+            for seq_idx, ith_data in enumerate(top_3):
+                c = torch.bincount(ith_data)
+                ids = torch.nonzero(c, as_tuple=True)[0]
+                counts[seq_idx, ids] += c[ids]
+
+            if batch_idx % 1000 == 0:
                 for bs_num in range(target_head.shape[0]):
                     print(f"top_3 tokens of batch {bs_num}:")
                     for i, distribution in enumerate(output['jacobi_logits'][bs_num]):
-                        
                         top_3 = distribution.argsort(descending=True)[:3]
-                        print(f"<[{i}-Target]{tokenizer.decode(data['target'][bs_num][i])}>, <[{i}-1]{tokenizer.decode([top_3[0]])}>, <[{i}-2]{tokenizer.decode([top_3[1]])}>, <[{i}-3]{tokenizer.decode([top_3[2]])}>")
+                        target_decode = tokenizer.decode(data['target'][bs_num][i])
+                        target_decode = "\\n" if target_decode == '\n' else target_decode
+                        report = f"<[{i}-Target]{target_decode}>, "
+                        for idx, token in enumerate(top_3):
+                            decode = tokenizer.decode([token])
+                            decode = "\\n" if decode == '\n' else decode
+                            report += f"<[{i}-{idx+1}]{decode}>, "
+                        print(report)
+                top_5 = counts.argsort(dim=-1, descending=True)[:5]
+                report = f"[{batch_idx}]\n"
+                for seq_id, seq_data in enumerate(top_5):
+                    report += f"[token {seq_id}] "
+                    for i, token in enumerate(seq_data):
+                        decode = tokenizer.decode([token])
+                        decode = "\\n" if decode == '\n' else decode
+                        report += f"<top {i+1}: {decode}({counts[token]} times)>, "
+                    report = report[:-2] + "\n"
+                print(report)
 
             vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion)#, loss_mask)
             loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
@@ -285,6 +314,7 @@ for epoch in range(num_epochs + 1):
         if debug_mode and batch_idx % 500 == 0:
             print(torch.cuda.memory_summary(device='cuda', abbreviated=True), flush=True)
 
+    epoch_counts.append(counts)
     epoch_loss /= num_batches
     if accelerator.is_local_main_process:
         print('Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
@@ -345,6 +375,7 @@ for epoch in range(num_epochs + 1):
 
             accelerator.save_state(output_dir=f"{train_config['cpdir']}/{train_config['name']}/state_{epoch}")
 
+torch.save(torch.stack(epoch_counts, dim=0), f"{train_config['cpdir']}/epoch_counts.pt")
 
 
 

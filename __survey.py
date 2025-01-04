@@ -22,11 +22,11 @@ def survey_total_trainable_parameters(pretrained_model_name_or_path="./Qwen2.5-0
     return total_params
 
 
-def survey_training_data_token_distribution(pretrained_model_name_or_path="./Qwen2.5-0.5B-Instruct", datapath='./data_root/ShareGPT_Vicuna_unfiltered_Qwen2.5-0.5B-Instruct', jacobi_tokens=10, batch_size=2, vocal_dim=151936):
+def survey_training_data_token_distribution(pretrained_model_name_or_path="./Qwen2.5-0.5B-Instruct", datapath='./data_root/ShareGPT_Vicuna_unfiltered_Qwen2.5-0.5B-Instruct', jacobi_tokens=10, batch_size=16, vocal_dim=151936):
     datapath = list_files(datapath)
     custom_dataset = CustomDataset(datapath, jacobi_tokens=jacobi_tokens)
     data_loader = DataLoader(custom_dataset, batch_size=batch_size, shuffle=False,
-                         collate_fn=DataCollatorWithPadding(), num_workers=0, pin_memory=True)
+                         collate_fn=DataCollatorWithPadding(), num_workers=4, pin_memory=True)
     
     tokenizer = Qwen2Tokenizer.from_pretrained(pretrained_model_name_or_path, use_fast=False)
     counts = torch.zeros((vocal_dim,),dtype=torch.int16)
@@ -35,7 +35,7 @@ def survey_training_data_token_distribution(pretrained_model_name_or_path="./Qwe
         c = torch.bincount(flattened_data)
         ids = torch.nonzero(c, as_tuple=True)[0]
         counts[ids] += c[ids]
-        if (batch_idx + 1) % 1 == 0:
+        if (batch_idx + 1) % 500 == 0:
             report = f"[{batch_idx + 1:5d}] "
             top_5 = counts.argsort(descending=True)[:5]
             for i, token in enumerate(top_5):
