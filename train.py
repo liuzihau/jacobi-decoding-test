@@ -149,7 +149,9 @@ model = Qwen2JacobiForCausalLM.from_pretrained(
 model = model.to('cuda')
 for param in model.model.parameters():
     param.requires_grad = False
-model.init_trainable_weights(model.jacobi_weight)
+for name, param in model.named_parameters():
+    if param.requires_grad:   
+        model.init_trainable_weights(name, param)
 
 # data part
 datapath = list_files(train_config["datapath"])

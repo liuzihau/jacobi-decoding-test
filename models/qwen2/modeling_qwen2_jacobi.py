@@ -37,6 +37,21 @@ class Qwen2MLP(nn.Module):
     def forward(self, hidden_state):
         return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
 
+class BasicLinear(nn.Module):
+    def __init__(self, input_size, output_size, act=False):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = output_size
+        self.proj = nn.Linear(self.input_size, output_size)
+        self.act = act
+        self.act_fn = nn.SiLU()
+
+    def forward(self, hidden_state):
+        x = self.proj(hidden_state)
+        if self.act:
+            x = self.act_fn(x)
+        return x
+
 class ProjectionQwen2MLP(nn.Module):
     def __init__(self, input_size, output_size, intermediate_size=None, layers=1):
         super().__init__()
@@ -48,7 +63,7 @@ class ProjectionQwen2MLP(nn.Module):
 class ProjectionLinear(nn.Module):
     def __init__(self, input_size, output_size, layers):
         super().__init__()
-        self.module_list = nn.ModuleList([nn.Linear(input_size, output_size) for _ in range(layers)])
+        self.module_list = nn.ModuleList([BasicLinear(input_size, output_size) for _ in range(layers)])
     
     def forward(self, hidden_state, idx):
         return self.module_list[idx](hidden_state)
@@ -97,14 +112,14 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         
         self.post_init()
 
-    def init_trainable_weights(self, module):
+    def init_trainable_weights(self, name, param):
         std = self.config.initializer_range
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Parameter):
-            module.data.normal_(mean=0.0, std=std)
+        if 'proj.weight' in name:
+            nn.init.xavier_uniform_(param)
+        elif 'bias' in name:
+            nn.init.zeros_(param)  # Biases initialized to zero
+        elif 'jacobi_weight' in name:
+            nn.init.normal_(param, mean=0.0, std=std)  # Adjust bounds as necessary
 
     def get_input_embeddings(self):
         return self.model.embed_tokens

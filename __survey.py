@@ -8,10 +8,15 @@ from models.qwen2.modeling_qwen2_jacobi import Qwen2JacobiForCausalLM
 from models.qwen2.tokenization_qwen2_fast import Qwen2Tokenizer
 
 
-def survey_total_trainable_parameters(pretrained_model_name_or_path="./Qwen2.5-0.5B-Instruct", jacobi_token_nums=10, mix_sequences=1, proj_freq=4, adapter_type='Qwen2MLP', shared_adapter=False, shared_jacobi_token=True):
+def survey_total_trainable_parameters(pretrained_model_name_or_path="./Qwen2.5-0.5B-Instruct", jacobi_token_nums=10, mix_sequences=1, proj_freq=4, adapter_type='Linear', shared_adapter=False, shared_jacobi_token=True):
     
     def count_trainable_parameters(model):
-        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+        x = 0
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                print(name)
+                x+=p.numel()
+        return x
 
     model = Qwen2JacobiForCausalLM.from_pretrained(pretrained_model_name_or_path, jacobi_token_nums, mix_sequences, proj_freq, adapter_type, shared_adapter, shared_jacobi_token, torch_dtype="auto", device_map="auto")
     for param in model.model.parameters():
@@ -51,6 +56,6 @@ def load():
     print(x.shape)
 
 if __name__ == "__main__":
-    # survey_total_trainable_parameters()
-    counts = survey_training_data_token_distribution()
+    survey_total_trainable_parameters()
+    # counts = survey_training_data_token_distribution()
     
