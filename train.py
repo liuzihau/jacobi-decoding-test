@@ -377,7 +377,7 @@ for epoch in range(num_epochs + 1):
 
             accelerator.save_state(output_dir=f"{train_config['cpdir']}/{train_config['name']}/state_{epoch}")
 
-torch.save(torch.stack(epoch_counts, dim=0), f"{train_config['cpdir']}/epoch_counts.pt")
+torch.save(torch.stack(epoch_counts, dim=0), f"{train_config['cpdir']}/{train_config['name']}epoch_counts.pt")
 
 
 
