@@ -161,7 +161,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
             return modified_embeds
 
-    def run_decoder_layer_with_previous_hidden_proj(self, decoder_layer, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings):
+    def forward_backbone_decoder_layer(self, decoder_layer, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings):
         residual = hidden_states
 
         hidden_states = decoder_layer.input_layernorm(hidden_states)
@@ -191,16 +191,20 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         if (layer_idx + 1) % self.proj_freq == 0:
             target_states = []
             for i in range(hidden_states.shape[0]):
-                replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
-                prev_seq_indices = replace_indices[:self.mix_sequences] - self.mix_sequences
-                all_indices = torch.cat([prev_seq_indices, replace_indices], dim=-1)
-                target_states.append(hidden_states[i, all_indices])
-            target_states = torch.stack(target_states, dim=0)  # [bs, jacobi + mix_seq, hidden_dim]
+                replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]  #[6, 7, 9, 10, 12, 13]
+                replace_indices_groups = replace_indices.view(-1, self.jacobi_token_nums)  # [[6, 7], [9, 10], [12, 13]]
+                prev_seq_indices_groups = (replace_indices_groups[:, 0] - self.mix_sequences).reshape(-1, 1)  #[[5], [8], [11]]
+                all_indices = torch.cat([prev_seq_indices_groups, replace_indices_groups], dim=0)  #[[5, 6, 7], [8, 9, 10], [11, 12, 13]]
+                
+                # prev_seq_indices = replace_indices[:self.mix_sequences] - self.mix_sequences
+                # all_indices = torch.cat([prev_seq_indices, replace_indices], dim=-1)
+                target_states.append(hidden_states[i, all_indices])  # [groups, jacobi_token_nums + mix_seq, hidden_dim]
+            target_states = torch.stack(target_states, dim=0)  # [bs, groups, jacobi_token_nums + mix_seq, hidden_dim]
             
-            curr_states = target_states[:, -self.jacobi_token_nums:, :]
+            curr_states = target_states[:, :, -self.jacobi_token_nums:, :]  # [bs, groups, jacobi_token_nums, hidden_dim]
             new_states = None
             for i in range(self.mix_sequences):
-                prev_states = target_states[:, -(self.jacobi_token_nums+i+1):-(i+1), :]
+                prev_states = target_states[:, :, -(self.jacobi_token_nums+i+1):-(i+1), :]
                 curr_states = torch.cat([curr_states, prev_states], dim=-1)
                 if self.shared_adapter:
                     adapter_idx = 0
@@ -214,7 +218,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
             for i in range(hidden_states.shape[0]):
                 replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
-                hidden_states[i, replace_indices] = new_states[i]
+                hidden_states[i, replace_indices] = new_states[i].reshape(-1, hidden_states.shape[-1])
 
         outputs = (hidden_states,)
         if output_attentions:
@@ -225,7 +229,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         return outputs
 
-    def run_decoder_layers_with_jacobi_tokens(self, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings, output_hidden_states):
+    def forward_backbone_decoder_layers(self, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings, output_hidden_states):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
@@ -233,7 +237,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         for decoder_layer in self.model.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
-            layer_outputs = self.run_decoder_layer_with_previous_hidden_proj(
+            layer_outputs = self.forward_backbone_decoder_layer(
                 decoder_layer=decoder_layer,
                 hidden_states=hidden_states,
                 causal_mask=causal_mask,
@@ -347,7 +351,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         causal_mask = torch.stack(causal_mask, dim=0)
 
         # decoder layers with jacobi tokens
-        hidden_states, all_hidden_states, next_decoder_cache, all_self_attns = self.run_decoder_layers_with_jacobi_tokens(hidden_states=hidden_states, 
+        hidden_states, all_hidden_states, next_decoder_cache, all_self_attns = self.forward_backbone_decoder_layers(hidden_states=hidden_states, 
                                                                                                                           causal_mask=causal_mask,
                                                                                                                           loss_mask=loss_mask, 
                                                                                                                           position_ids=position_ids, 

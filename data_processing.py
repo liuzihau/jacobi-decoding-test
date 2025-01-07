@@ -14,13 +14,13 @@ def list_files(path):
     return datapath
 
 class CustomDataset(Dataset):
-    def __init__(self, datapath, max_len=2048, jacobi_tokens=10, use_multi_token_sets=False, transform=None, vocab_size=151936):
+    def __init__(self, datapath, max_len=2048, jacobi_tokens=10, use_multi_token_sets=False, transform=None, pad_id=151936):
         self.data = datapath
         self.max_len = max_len
         self.jacobi_tokens = jacobi_tokens
         self.use_multi_token_sets = use_multi_token_sets
         self.transform = transform
-        self.pad = vocab_size + 2025
+        self.pad = pad_id
 
     def __len__(self):
         return len(self.data)

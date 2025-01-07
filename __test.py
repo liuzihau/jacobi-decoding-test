@@ -175,42 +175,42 @@ Test input data correct or not
 # print(cache_position)
 
 
-input_embeds = torch.Tensor([[20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32],
-                             [40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52]])
+# input_embeds = torch.Tensor([[20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32],
+#                              [40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52]])
 
-loss_mask = torch.Tensor([[0, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0],
-                          [0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1]])
+# loss_mask = torch.Tensor([[0, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0],
+#                           [0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1]])
 
-jacobi_tokens = 2
+# jacobi_tokens = 2
 
-target_length = input_embeds.shape[1]
+# target_length = input_embeds.shape[1]
 
-device = input_embeds.device
-dtype = input_embeds.dtype
-min_dtype = torch.finfo(dtype).min
+# device = input_embeds.device
+# dtype = input_embeds.dtype
+# min_dtype = torch.finfo(dtype).min
 
-final_mask = []
-for batch_idx in range(input_embeds.shape[0]):
-    causal_mask = torch.full(
-        (target_length, target_length), fill_value=min_dtype
-        , dtype=dtype, device=device
-    )
-    diagonal_attend_mask = torch.arange(target_length, device=device, dtype=torch.int32)
-    diagonal_attend_mask = diagonal_attend_mask > diagonal_attend_mask.reshape(-1, 1)
+# final_mask = []
+# for batch_idx in range(input_embeds.shape[0]):
+#     causal_mask = torch.full(
+#         (target_length, target_length), fill_value=min_dtype
+#         , dtype=dtype, device=device
+#     )
+#     diagonal_attend_mask = torch.arange(target_length, device=device, dtype=torch.int32)
+#     diagonal_attend_mask = diagonal_attend_mask > diagonal_attend_mask.reshape(-1, 1)
 
-    replace_indices_groups = torch.nonzero(loss_mask[batch_idx] == 1, as_tuple=True)[0].view(-1, jacobi_tokens)
-    x = loss_mask[batch_idx].repeat(diagonal_attend_mask.shape[-1], 1)
-    for i in replace_indices_groups:
-        x[i[0]:i[-1]+1, i[0]:i[-1]+1] = 0
+#     replace_indices_groups = torch.nonzero(loss_mask[batch_idx] == 1, as_tuple=True)[0].view(-1, jacobi_tokens)
+#     x = loss_mask[batch_idx].repeat(diagonal_attend_mask.shape[-1], 1)
+#     for i in replace_indices_groups:
+#         x[i[0]:i[-1]+1, i[0]:i[-1]+1] = 0
 
-    diagonal_attend_mask.bitwise_or_(x.type(torch.bool))
-    causal_mask *= diagonal_attend_mask
-    final_mask.append(causal_mask.unsqueeze(0))
-    print(diagonal_attend_mask.type(torch.int32))
+#     diagonal_attend_mask.bitwise_or_(x.type(torch.bool))
+#     causal_mask *= diagonal_attend_mask
+#     final_mask.append(causal_mask.unsqueeze(0))
+#     print(diagonal_attend_mask.type(torch.int32))
 
-final_mask = torch.stack(final_mask, dim=0)
+# final_mask = torch.stack(final_mask, dim=0)
 
-print(final_mask.shape)
+# print(final_mask.shape)
 
 
 
@@ -226,4 +226,21 @@ print(final_mask.shape)
     # print(diagonal_attend_mask.bitwise_or_(loss_mask[batch_idx].type(torch.bool)))
     # causal_mask *= diagonal_attend_mask
     # print(causal_mask + torch.eye(target_length, dtype=dtype))
-    
+
+
+
+
+# Example index tensor of shape [12, 3]
+index = torch.randint(0, 14, (4, 3))  # Replace with your actual index tensor
+
+# Example target tensor of shape [27, 16]
+target = torch.arange(14*8*2).reshape(2, 14, 8)  # Replace with your actual target tensor
+
+# Create the output tensor of shape [12, 3, 16]
+# Use indexing to get the corresponding rows
+output = target[0, index]  # Indexing directly
+
+print(index)
+print(target)
+print(output)
+print(output.shape)
