@@ -146,12 +146,15 @@ model = Qwen2JacobiForCausalLM.from_pretrained(
     torch_dtype="auto",
     device_map="auto"
 )
+
 model = model.to('cuda')
 for param in model.model.parameters():
     param.requires_grad = False
+
+initialise_method = train_config["initialise_method"] if "initialise_method" in train_config else 'kaiming'
 for name, param in model.named_parameters():
     if param.requires_grad:   
-        model.init_trainable_weights(name, param)
+        model.init_trainable_weights(name, param, initialise_method)
 
 # data part
 datapath = list_files(train_config["datapath"])
@@ -378,87 +381,3 @@ for epoch in range(num_epochs + 1):
             accelerator.save_state(output_dir=f"{train_config['cpdir']}/{train_config['name']}/state_{epoch}")
 
 torch.save(torch.stack(epoch_counts, dim=0), f"{train_config['cpdir']}/{train_config['name']}epoch_counts.pt")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    #     top_3acc = [0 for _ in range(3)]
-    #     correct = 0
-    #     total = 0
-    #     epoch_loss = 0
-    #     num_batches = 0
-        # model.eval()
-
-    #     k_acc = [[] for i in range(5)]
-    #     for batch_idx, data in enumerate(tqdm(test_loader)):
-    #         with torch.no_grad():
-    #             if batch_idx < 5:
-    #                 acces = getkacc(model, data, head, max_length=5)
-    #                 for i in range(len(acces)):
-    #                     k_acc[i].append(acces[i])
-    #             predict = model(data["hidden_states"], input_ids=data["input_ids"],
-    #                             attention_mask=data["attention_mask"])
-    #             target_head = head(data["target"])
-    #             target_p = nn.Softmax(dim=2)(target_head)
-    #             target_p = target_p.detach()
-    #             loss_mask = data["loss_mask"][:, :, None]
-    #             vloss, ploss, out_head = compute_loss(data["target"], target_p, predict, criterion, loss_mask)
-    #             loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
-    #             _, predicted = torch.max(out_head, 2)
-    #             _, target = torch.max(target_head, 2)
-    #             ct = loss_mask.sum().item()
-    #             cc = ((predicted == target) * loss_mask.squeeze()).sum().item()
-    #             out_head = out_head.view(-1, target_head.shape[-1])[loss_mask.view(-1) == 1]
-    #             target = target.view(-1)[loss_mask.view(-1) == 1]
-    #             topkacc = top_accuracy(out_head, target, (1, 2, 3))
-    #             for top_i in range(len(topkacc)):
-    #                 top_3acc[top_i] += topkacc[top_i]
-    #             total += ct
-    #             correct += cc
-
-    #             del ploss, vloss, out_head, target_head, target_p
-    #             gc.collect()
-    #             torch.cuda.empty_cache()
-                
-    #         epoch_loss += loss.item()
-    #         num_batches += 1
-
-    #     mean_acces = []
-    #     for id, i in enumerate(k_acc):
-    #         mean_acc = np.array(i).mean()
-    #         mean_acc = torch.tensor(mean_acc).cuda()
-    #         mean_acces.append(mean_acc)
-
-    #     mean_acces = accelerator.gather_for_metrics(mean_acces)
-    #     if accelerator.is_local_main_process:
-    #         for id, i in enumerate(mean_acces):
-    #             mean_acc = i.mean().item()
-    #             wandb.log({f"test/{id}_acc": mean_acc})
-
-    #     correct, total = torch.tensor(correct).cuda(), torch.tensor(total).cuda()
-    #     correct, total = accelerator.gather_for_metrics((correct, total))
-    #     correct, total = correct.sum().item(), total.sum().item()
-    #     top_3acc = accelerator.gather_for_metrics(top_3acc)
-    #     if accelerator.is_local_main_process:
-    #         for id, i in enumerate(top_3acc):
-    #             wandb.log({f'test/top_{id + 1}_acc': i.sum().item() / total})
-    #     epoch_loss /= num_batches
-    #     if accelerator.is_local_main_process:
-    #         print('Test Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
-    #         print('Test Accuracy: {:.2f}%'.format(100 * correct / total))
-    #         wandb.log({"test/epochacc": correct / total, "test/epochloss": epoch_loss})
-    #         if not os.path.exists(train_config['cpdir']):
-    #             os.mkdir(train_config['cpdir'])
-    #         if not os.path.exists(f"{train_config['cpdir']}/{train_config['name']}"):
-    #             os.mkdir(f"{train_config['cpdir']}/{train_config['name']}")

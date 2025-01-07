@@ -851,7 +851,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 )
 
 
-    def run_embedding(self, input_ids, inputs_embeds):
+    def embedding(self, input_ids, inputs_embeds):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         return inputs_embeds
@@ -872,9 +872,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         
         output_attentions, output_hidden_states, return_dict, use_cache, return_legacy_cache = self.get_pre_setting(input_ids, past_key_values, inputs_embeds, use_cache, output_attentions, output_hidden_states, return_dict)
-        inputs_embeds = self.run_embedding(input_ids, inputs_embeds)
-
-        # print(cache_position, position_ids, past_key_values)
+        inputs_embeds = self.embedding(input_ids, inputs_embeds)
         
         
         if cache_position is None:

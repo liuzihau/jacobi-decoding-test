@@ -79,6 +79,9 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.vocab_size = config.vocab_size
         self.mix_sequences = mix_sequences
         self.proj_freq = proj_freq
+        self.jacobi_token_nums = jacobi_token_nums
+        self.shared_adapter = shared_adapter
+        self.shared_jacobi_token = shared_jacobi_token        
         
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         
@@ -92,30 +95,32 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         else:
             raise NotImplementedError(f"{adapter_type} hasn't been implemented")
         
-        self.shared_adapter = shared_adapter
         if self.shared_adapter:
             adapter_layers = 1
         else:
             adapter_layers = attn_layers // self.proj_freq
         self.adapters = nn.ModuleList([adapter_module((n+2)*attn_hidden_size, attn_hidden_size, layers=adapter_layers) for n in range(mix_sequences)])
         
+
         temp_weight = torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5
         temp_weight = temp_weight.to(dtype=torch.bfloat16)  # can be remove?
 
-        self.jacobi_weight = nn.Parameter(temp_weight)
-   
-        self.jacobi_token_nums = jacobi_token_nums
-
-        # for adapter in self.adapters:
-            # self.init_weights(adapter)
-        # self.init_weights(self.jacobi_weight)
+        if self.shared_jacobi_token:
+            self.jacobi_weight = nn.Parameter(temp_weight)
+        else:
+            self.jacobi_weight = torch.stack([nn.Parameter(temp_weight)] * self.jacobi_token_nums, dim=0)
         
         self.post_init()
 
-    def init_trainable_weights(self, name, param):
+    def init_trainable_weights(self, name, param, method='kaiming'):
         std = self.config.initializer_range
         if 'proj.weight' in name:
-            nn.init.xavier_uniform_(param)
+            if method == 'xavier':
+                nn.init.xavier_uniform_(param)
+            elif method == 'kaiming':
+                nn.init.kaiming_uniform_(param, a=0, mode='fan_in', nonlinearity='relu')
+            else:
+                raise NotImplementedError
         elif 'bias' in name:
             nn.init.zeros_(param)  # Biases initialized to zero
         elif 'jacobi_weight' in name:
@@ -139,7 +144,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
     
-    def merge_with_jacobi_tokens(self, inputs_embeds, loss_mask, jacobi_tokens=None):
+    def merge_jacobi_tokens(self, inputs_embeds, loss_mask, jacobi_tokens=None):
         if jacobi_tokens is None:
             # Clone inputs_embeds to avoid modifying the original tensor
             modified_embeds = inputs_embeds.clone()
@@ -148,22 +153,14 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             for i in range(inputs_embeds.shape[0]):
                 # Find indices where loss_mask == 1 for this batch
                 replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
-
-                # Ensure the number of replace indices matches the jacobi tokens
-                assert len(replace_indices) >= self.jacobi_token_nums, "Not enough positions in loss_mask to replace with all jacobi tokens"
-
-                # Select the first `jacobi_token_nums` indices to replace
-                replace_indices = replace_indices[:self.jacobi_token_nums]
-
-                # Replace embeddings at the specified indices with jacobi tokens
-                modified_embeds[i, replace_indices] = self.jacobi_weight
+                if self.shared_jacobi_token:
+                    modified_embeds[i, replace_indices] = self.jacobi_weight
+                else:
+                    expand_weight = self.jacobi_weight.repeat(replace_indices.shape[0] // self.jacobi_token_nums, 1)
+                    modified_embeds[i].scatter_(0, replace_indices.unsqueeze(-1).expand(-1, self.jacobi_weight.shape[-1]), expand_weight)
 
             return modified_embeds
 
-        # if jacobi_tokens is None:
-        #     jacobi_sequence = self.jacobi_weight.unsqueeze(0).unsqueeze(0).repeat(inputs_embeds.shape[0], self.jacobi_token_nums, 1)
-        #     return torch.cat([inputs_embeds, jacobi_sequence], dim=1)
-    
     def run_decoder_layer_with_previous_hidden_proj(self, decoder_layer, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings):
         residual = hidden_states
 
@@ -264,7 +261,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         
         return hidden_states, all_hidden_states, next_decoder_cache, all_self_attns
 
-    def get_feature(
+    def forward_backbone_model(
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -279,39 +276,75 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
-        # Qwen2Model forward
-        output_attentions, output_hidden_states, return_dict, use_cache, return_legacy_cache = self.model.get_pre_setting(input_ids=input_ids, 
-                                                                                                                          past_key_values=past_key_values, 
-                                                                                                                          inputs_embeds=inputs_embeds, 
-                                                                                                                          use_cache=use_cache, 
-                                                                                                                          output_attentions=output_attentions, 
-                                                                                                                          output_hidden_states=output_hidden_states, 
-                                                                                                                          return_dict=return_dict)
-        inputs_embeds = self.model.run_embedding(input_ids=input_ids, inputs_embeds=inputs_embeds)
+        (output_attentions, 
+         output_hidden_states, 
+         return_dict, 
+         use_cache, 
+         return_legacy_cache) = self.model.get_pre_setting(input_ids=input_ids, 
+                                                          past_key_values=past_key_values, 
+                                                          inputs_embeds=inputs_embeds, 
+                                                          use_cache=use_cache, 
+                                                          output_attentions=output_attentions, 
+                                                          output_hidden_states=output_hidden_states, 
+                                                          return_dict=return_dict)
+        
+        inputs_embeds = self.model.embedding(input_ids=input_ids, inputs_embeds=inputs_embeds)
 
         # insert jacobi tokens
-        inputs_embeds = self.merge_with_jacobi_tokens(inputs_embeds, loss_mask)
+        inputs_embeds = self.merge_jacobi_tokens(inputs_embeds, loss_mask)
 
-        # print(cache_position, position_ids)
+        # if model is training -> don't allow cache_position
+        cache_position = torch.ones_like(inputs_embeds) * -1
+        jacobi_position = torch.arange(self.jacobi_token_nums)
+        for batch_idx in range(inputs_embeds.shape[0]):
+            # handle normal input position
+            inputs_position = torch.arange(loss_mask[batch_idx].shape[0] - loss_mask[batch_idx].sum(-1))
+            replace_indices = torch.nonzero(loss_mask[batch_idx] == 0, as_tuple=True)[0]
+            cache_position[batch_idx, replace_indices] = inputs_position
 
-        # add positions for jacobi tokens
-        if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device)
-        else:
-            last_cache_num = cache_position[-1].item()
-            jacobi_position = torch.arange(last_cache_num+1, last_cache_num + self.jacobi_token_nums + 1, device=inputs_embeds.device)
-            cache_position = torch.cat([cache_position, jacobi_position], dim=-1)
+            # handle jacobi tokens' position
+            replace_indices = torch.nonzero(cache_position[batch_idx] == -1, as_tuple=True)[0]
+            replace_indices_groups = replace_indices.view(-1, self.jacobi_token_nums)            
+            prefix_position = cache_position[batch_idx, (replace_indices_groups[:, 0] - 1)].repeat(self.jacobi_token_nums, 1).transpose(-1, -2)
+            true_jacobi_position = (prefix_position + jacobi_position + 1).flatten()
+            cache_position[batch_idx, replace_indices] = true_jacobi_position
+            
+        # if cache_position is None:
+        #     past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+        #     cache_position = torch.arange(past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device)
+        # else:
+        #     last_cache_num = cache_position[-1].item()
+        #     jacobi_position = torch.arange(last_cache_num+1, last_cache_num + self.jacobi_token_nums + 1, device=inputs_embeds.device)
+        #     cache_position = torch.cat([cache_position, jacobi_position], dim=-1)
 
         # if position_ids is None:
-        position_ids = cache_position.unsqueeze(0)
+        # position_ids = cache_position.unsqueeze(0)
+        position_ids = cache_position
 
         hidden_states = inputs_embeds
         
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.model.rotary_emb(hidden_states, position_ids)
         
-        causal_mask = self.model._update_causal_mask(attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions)
+        # causal_mask = self.model._update_causal_mask(attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions)
+        target_length = hidden_states.shape[1]
+        device = hidden_states.device
+        dtype = hidden_states.dtype
+        min_dtype = torch.finfo(dtype).min
+        deny_mask = torch.full((target_length, target_length), fill_value=min_dtype, dtype=dtype, device=device)
+        causal_mask = []
+        for batch_idx in range(hidden_states.shape[0]):
+            diagonal_attend_mask = torch.arange(target_length, device=device, dtype=torch.int32)
+            diagonal_attend_mask = diagonal_attend_mask > diagonal_attend_mask.reshape(-1, 1)
+
+            replace_indices_groups = torch.nonzero(loss_mask[batch_idx] == 1, as_tuple=True)[0].view(-1, self.jacobi_token_nums)
+            curr_loss_mask = loss_mask[batch_idx].repeat(diagonal_attend_mask.shape[-1], 1)
+            for i in replace_indices_groups:
+                curr_loss_mask[i[0]:i[-1]+1, i[0]:i[-1]+1] = 0
+            diagonal_attend_mask.bitwise_or_(curr_loss_mask.type(torch.bool))
+            final_mask = deny_mask * diagonal_attend_mask
+            causal_mask.append(final_mask.unsqueeze(0))
+        causal_mask = torch.stack(causal_mask, dim=0)
 
         # decoder layers with jacobi tokens
         hidden_states, all_hidden_states, next_decoder_cache, all_self_attns = self.run_decoder_layers_with_jacobi_tokens(hidden_states=hidden_states, 
@@ -364,7 +397,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.get_feature(
+        outputs = self.forward_backbone_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             loss_mask=loss_mask,
