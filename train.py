@@ -248,10 +248,15 @@ for epoch in range(num_epochs + 1):
                 print(f"attn_mask len and sum: {data['attention_mask'].shape}, {data['attention_mask'].sum()}")
                 print(f"loss_mask len and index: {data['loss_mask'].shape}, {torch.nonzero(data['loss_mask'][0] == 1, as_tuple=True)[0]}")
 
-            # record total generated top_3 tokens
-            top_3 = output['jacobi_logits'].argsort(dim=-1, descending=True)[:, :, :3]
-            top_3 = top_3.permute(1, 0, 2).reshape(jacobi_token_nums, -1)
-            for seq_idx, ith_data in enumerate(top_3):
+            # record total generated top_k tokens
+            K = 3
+            top_k = output['jacobi_logits'].argsort(dim=-1, descending=True)[:, :, :K]  # [bs, jacobi_tokens * sets, top_k]
+            bs, seq, k = top_k.shape
+            sets = seq // jacobi_token_nums
+            top_k_group = top_k.view(bs, sets, jacobi_token_nums, k)
+            top_k = top_k_group.reshape(-1, jacobi_token_nums, k)
+            top_k = top_k.permute(1, 0, 2).reshape(jacobi_token_nums, -1)
+            for seq_idx, ith_data in enumerate(top_k):
                 c = torch.bincount(ith_data)
                 ids = torch.nonzero(c, as_tuple=True)[0]
                 counts[seq_idx, ids] += c[ids]
@@ -259,7 +264,7 @@ for epoch in range(num_epochs + 1):
             if batch_idx % 1000 == 0:
                 for bs_num in range(target_head.shape[0]):
                     print(f"top_3 tokens of batch {bs_num}:")
-                    for i, distribution in enumerate(output['jacobi_logits'][bs_num]):
+                    for i, distribution in enumerate(output['jacobi_logits'][bs_num][:jacobi_token_nums]):
                         top_3 = distribution.argsort(descending=True)[:3]
                         target_decode = tokenizer.decode(data['target'][bs_num][i])
                         target_decode = "\\n" if target_decode == '\n' else target_decode

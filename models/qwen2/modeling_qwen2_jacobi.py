@@ -194,7 +194,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]  #[6, 7, 9, 10, 12, 13]
                 replace_indices_groups = replace_indices.view(-1, self.jacobi_token_nums)  # [[6, 7], [9, 10], [12, 13]]
                 prev_seq_indices_groups = (replace_indices_groups[:, 0] - self.mix_sequences).reshape(-1, 1)  #[[5], [8], [11]]
-                all_indices = torch.cat([prev_seq_indices_groups, replace_indices_groups], dim=0)  #[[5, 6, 7], [8, 9, 10], [11, 12, 13]]
+                all_indices = torch.cat([prev_seq_indices_groups, replace_indices_groups], dim=-1)  #[[5, 6, 7], [8, 9, 10], [11, 12, 13]]
                 
                 # prev_seq_indices = replace_indices[:self.mix_sequences] - self.mix_sequences
                 # all_indices = torch.cat([prev_seq_indices, replace_indices], dim=-1)
@@ -423,7 +423,6 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # Iterate through the batch dimension
         for i in range(hidden_states.shape[0]):
             replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
-            replace_indices = replace_indices[:self.jacobi_token_nums]
             # lm_hidden_states = hidden_states[:, :-self.jacobi_token_nums, :]
             jacobi_hidden_states.append(hidden_states[i, replace_indices, :])
 
