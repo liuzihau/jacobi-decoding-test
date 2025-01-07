@@ -169,8 +169,8 @@ if train_config["debug_mode"]:
     print(f"train data: {len(traindatapath)}")
     print(f"test data: {len(testdatapath)}")
 
-traindataset = CustomDataset(traindatapath, jacobi_tokens=train_config["jacobi_token_nums"])
-testdataset = CustomDataset(testdatapath, jacobi_tokens=train_config["jacobi_token_nums"])
+traindataset = CustomDataset(traindatapath, jacobi_tokens=train_config["jacobi_token_nums"], use_multi_token_sets=train_config["use_multi_token_sets"])
+testdataset = CustomDataset(testdatapath, jacobi_tokens=train_config["jacobi_token_nums"], use_multi_token_sets=train_config["use_multi_token_sets"])
 
 train_loader = DataLoader(traindataset, batch_size=train_config["bs"], shuffle=shuffle_data,
                           collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"],

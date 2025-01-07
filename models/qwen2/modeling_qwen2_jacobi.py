@@ -294,11 +294,11 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         inputs_embeds = self.merge_jacobi_tokens(inputs_embeds, loss_mask)
 
         # if model is training -> don't allow cache_position
-        cache_position = torch.ones_like(inputs_embeds) * -1
-        jacobi_position = torch.arange(self.jacobi_token_nums)
+        cache_position = torch.ones_like(input_ids, device=input_ids.device) * -1
+        jacobi_position = torch.arange(self.jacobi_token_nums, device=input_ids.device)
         for batch_idx in range(inputs_embeds.shape[0]):
             # handle normal input position
-            inputs_position = torch.arange(loss_mask[batch_idx].shape[0] - loss_mask[batch_idx].sum(-1))
+            inputs_position = torch.arange(loss_mask[batch_idx].shape[0] - loss_mask[batch_idx].sum(-1), device=input_ids.device)
             replace_indices = torch.nonzero(loss_mask[batch_idx] == 0, as_tuple=True)[0]
             cache_position[batch_idx, replace_indices] = inputs_position
 
