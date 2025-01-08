@@ -230,17 +230,17 @@ Test input data correct or not
 
 
 
-# Example index tensor of shape [12, 3]
-index = torch.randint(0, 14, (4, 3))  # Replace with your actual index tensor
+# # Example index tensor of shape [12, 3]
+# index = torch.randint(0, 14, (4, 3))  # Replace with your actual index tensor
 
-# Example target tensor of shape [27, 16]
-target = torch.arange(14*8*2).reshape(2, 14, 8)  # Replace with your actual target tensor
+# # Example target tensor of shape [27, 16]
+# target = torch.arange(14*8*2).reshape(2, 14, 8)  # Replace with your actual target tensor
 
-# Create the output tensor of shape [12, 3, 16]
-# Use indexing to get the corresponding rows
-output = target[0, index]  # Indexing directly
+# # Create the output tensor of shape [12, 3, 16]
+# # Use indexing to get the corresponding rows
+# output = target[0, index]  # Indexing directly
 
-print(index)
-print(target)
-print(output)
-print(output.shape)
+# print(index)
+# print(target)
+# print(output)
+# print(output.shape)

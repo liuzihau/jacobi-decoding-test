@@ -14,13 +14,14 @@ def list_files(path):
     return datapath
 
 class CustomDataset(Dataset):
-    def __init__(self, datapath, max_len=2048, jacobi_tokens=10, use_multi_token_sets=False, transform=None, pad_id=151936):
+    def __init__(self, datapath, max_len=2048, jacobi_tokens=10, use_multi_token_sets=False, transform=None, pad_id=151643, vocab_size=151936):
         self.data = datapath
         self.max_len = max_len
         self.jacobi_tokens = jacobi_tokens
         self.use_multi_token_sets = use_multi_token_sets
         self.transform = transform
         self.pad = pad_id
+        self.fake_id = vocab_size + 2025
 
     def __len__(self):
         return len(self.data)
@@ -57,13 +58,14 @@ class CustomDataset(Dataset):
 
             input_ids = torch.cat([input_ids, generated_tokens[:start]],dim=-1) if start > 0 else input_ids
             generated_tokens = generated_tokens[start:end]
-            padding_tensor = torch.ones((self.jacobi_tokens,), dtype=generated_tokens.dtype) * self.pad
+            padding_tensor = torch.ones((self.jacobi_tokens,), dtype=generated_tokens.dtype) * self.fake_id
             padding_tensors = torch.stack([padding_tensor] * generated_tokens.shape[0], dim=0)
             merged_tokens = torch.cat([generated_tokens[:, None], padding_tensors], dim=-1).flatten()  #[token1, 0, 0, token2, 0, 0, ...]
             input_ids = torch.cat([input_ids, padding_tensor, merged_tokens])
 
-            jacobi_indices = torch.nonzero(input_ids == self.pad, as_tuple=True)
+            jacobi_indices = torch.nonzero(input_ids == self.fake_id, as_tuple=True)
             loss_mask = torch.zeros_like(input_ids)
+            input_ids[jacobi_indices] = self.pad
             loss_mask[jacobi_indices] = 1
             loss_mask = loss_mask.tolist()
 
@@ -137,14 +139,14 @@ if __name__ == "__main__":
     train_config = {
     "basepath_local": "./Qwen2.5-0.5B-Instruct",
     "datapath": "./data_root/ShareGPT_Vicuna_unfiltered_Qwen2.5-0.5B-Instruct",
-    "bs": 4,
+    "bs": 2,
     "num_workers": 0
     }
 
     datapath = list_files(train_config["datapath"])
     traindatapath = datapath  #[:int(len(datapath) * 0.95)]
 
-    traindataset = CustomDataset(traindatapath, jacobi_tokens=3, use_multi_token_sets=True)
+    traindataset = CustomDataset(traindatapath, jacobi_tokens=4, use_multi_token_sets=True)
     train_loader = DataLoader(traindataset, batch_size=train_config["bs"], shuffle=True,
                             collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"],
                             pin_memory=True)
@@ -182,10 +184,10 @@ if __name__ == "__main__":
         #         sentense += f"<[{i}-{loss}][{decode}][{target}]> "
         #     print(sentense)
 
-        loss_mask = data['loss_mask']
-        replace_indices = torch.nonzero(loss_mask[0] == 1, as_tuple=True)[0]
-        print(replace_indices)
-        break
+        # loss_mask = data['loss_mask']
+        # replace_indices = torch.nonzero(loss_mask[0] == 1, as_tuple=True)[0]
+        # print(replace_indices)
+        # break
         
 
         
