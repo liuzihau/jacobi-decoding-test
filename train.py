@@ -21,7 +21,7 @@ def top_accuracy(output, target, jacobi_token_nums, topk=(1,)):
     # output.shape (bs, num_classes), target.shape (bs, )
     """Computes the accuracy over the k top predictions for the specified values of k"""
     output = output.view(-1, jacobi_token_nums, output.shape[-1])
-    target = target.view(-1, jacobi_token_nums, target.shape[-1])
+    target = target.view(-1, jacobi_token_nums)
     with torch.no_grad():
         maxk = max(topk)
         group_size = target.size(0)
@@ -38,8 +38,8 @@ def top_accuracy(output, target, jacobi_token_nums, topk=(1,)):
     
 def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, criterion, jacobi_token_nums, discount=1):
     # cross entropy -> sample distribution difference
-    target_p = nn.Softmax(dim=2)(target_logits)
-    out_logp = nn.LogSoftmax(dim=2)(jacobi_logits)
+    target_p = nn.Softmax(dim=-1)(target_logits)
+    out_logp = nn.LogSoftmax(dim=-1)(jacobi_logits)
     plogp = target_p * out_logp
     plogp = plogp.view(-1, jacobi_token_nums, plogp.shape[-1])
     ploss = -torch.sum(plogp) / (target_p.shape[0] * target_p.shape[1] + 1e-5)  # Normalize by batch and sequence
@@ -47,7 +47,7 @@ def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacob
     # regression -> hidden states difference
     vloss = criterion(jacobi_hidden_states, hidden_state_target)
     vloss = vloss.view(-1, jacobi_token_nums, vloss.shape[-1])
-    vloss = torch.mean(vloss, dim=2)  # Shape: [batch, sequence]
+    vloss = torch.mean(vloss, dim=-1)  # Shape: [batch, sequence]
     vloss = torch.sum(vloss) / (vloss.shape[0] * vloss.shape[1] + 1e-5)
 
     return vloss, ploss
@@ -357,7 +357,9 @@ for epoch in range(num_epochs + 1):
                 
                 target_head = model.lm_head(data["hidden_state_target"])
                 target_head = target_head.detach()
-            
+
+                print(output['jacobi_logits'].shape, target_head.shape, data["loss_mask"].sum(0).sum(1))
+                
                 vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
                 loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
             

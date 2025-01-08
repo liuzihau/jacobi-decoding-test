@@ -43,8 +43,7 @@ class CustomDataset(Dataset):
         if self.use_multi_token_sets:
             possible_sets = (self.max_len - input_nums - self.jacobi_tokens) // (self.jacobi_tokens+1) + 1
             start_limitation = generated_nums - self.jacobi_tokens - 2
-            
-            if possible_sets > generated_nums:
+            if possible_sets > start_limitation:
                 start, end = 0, start_limitation
             else:
                 start = 0  # random.randint(0, start_limitation-possible_sets)
@@ -154,13 +153,14 @@ if __name__ == "__main__":
     "basepath_local": "./Qwen2.5-0.5B-Instruct",
     "datapath": "./data_root/ShareGPT_Vicuna_unfiltered_Qwen2.5-0.5B-Instruct",
     "bs": 2,
+    "jacobi_tokens":5,
     "num_workers": 0
     }
 
     datapath = list_files(train_config["datapath"])
     traindatapath = datapath  #[:int(len(datapath) * 0.95)]
 
-    traindataset = CustomDataset(traindatapath, jacobi_tokens=4, use_multi_token_sets=True)
+    traindataset = CustomDataset(traindatapath, jacobi_tokens=train_config["jacobi_tokens"], use_multi_token_sets=True)
     train_loader = DataLoader(traindataset, batch_size=train_config["bs"], shuffle=True,
                             collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"],
                             pin_memory=True)
