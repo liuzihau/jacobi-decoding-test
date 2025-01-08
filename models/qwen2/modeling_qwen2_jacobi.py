@@ -189,6 +189,11 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # previous token projection
         layer_idx = decoder_layer.self_attn.layer_idx
         if (layer_idx + 1) % self.proj_freq == 0:
+            if self.shared_adapter:
+                adapter_idx = 0
+            else:
+                adapter_idx = layer_idx // self.proj_freq
+
             target_states = []
             for i in range(hidden_states.shape[0]):
                 replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]  #[6, 7, 9, 10, 12, 13]
@@ -199,26 +204,27 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 # prev_seq_indices = replace_indices[:self.mix_sequences] - self.mix_sequences
                 # all_indices = torch.cat([prev_seq_indices, replace_indices], dim=-1)
                 target_states.append(hidden_states[i, all_indices])  # [groups, jacobi_token_nums + mix_seq, hidden_dim]
-            target_states = torch.stack(target_states, dim=0)  # [bs, groups, jacobi_token_nums + mix_seq, hidden_dim]
+            target_states = torch.cat(target_states, dim=0)  # [mix groups from all bs, jacobi_token_nums + mix_seq, hidden_dim]
             
-            curr_states = target_states[:, :, -self.jacobi_token_nums:, :]  # [bs, groups, jacobi_token_nums, hidden_dim]
+            curr_states = target_states[:, -self.jacobi_token_nums:, :]  # [mix groups from all bs, jacobi_token_nums, hidden_dim]
             new_states = None
             for i in range(self.mix_sequences):
-                prev_states = target_states[:, :, -(self.jacobi_token_nums+i+1):-(i+1), :]
+                prev_states = target_states[:, -(self.jacobi_token_nums+i+1):-(i+1), :]
                 curr_states = torch.cat([curr_states, prev_states], dim=-1)
-                if self.shared_adapter:
-                    adapter_idx = 0
-                else:
-                    adapter_idx = layer_idx // self.proj_freq
+                
                 if new_states is None:
                     new_states = self.adapters[i](curr_states, adapter_idx)
                 else:
                     new_states += self.adapters[i](curr_states, adapter_idx)
             new_states /= self.mix_sequences
 
+            pointer = 0
             for i in range(hidden_states.shape[0]):
                 replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
-                hidden_states[i, replace_indices] = new_states[i].reshape(-1, hidden_states.shape[-1])
+                group = replace_indices.shape[0] // self.jacobi_token_nums
+                bs_new_states = new_states[pointer:pointer+group]
+                hidden_states[i, replace_indices] = bs_new_states.reshape(-1, hidden_states.shape[-1])
+                pointer += group
 
         outputs = (hidden_states,)
         if output_attentions:
