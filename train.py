@@ -17,17 +17,18 @@ from models.qwen2.modeling_qwen2_jacobi import Qwen2JacobiForCausalLM
 from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
 
-def top_accuracy(output, target, topk=(1,)):
+def top_accuracy(output, target, jacobi_token_nums, topk=(1,)):
     # output.shape (bs, num_classes), target.shape (bs, )
     """Computes the accuracy over the k top predictions for the specified values of k"""
-
+    output = output.view(-1, jacobi_token_nums, output.shape[-1])
+    target = target.view(-1, jacobi_token_nums, target.shape[-1])
     with torch.no_grad():
         maxk = max(topk)
-        batch_size = target.size(0)
-        seq_size = target.size(1)
+        group_size = target.size(0)
+        jacobi_seq_size = target.size(1)
         _, pred = output.topk(maxk, -1, True, True)  # bs, seq, topk ex [4, 10, 3]
         # pred = pred.t()
-        correct = pred.eq(target.view(batch_size, seq_size, -1).expand_as(pred))
+        correct = pred.eq(target.view(group_size, jacobi_seq_size, -1).expand_as(pred))
 
         res = []
         for k in topk:
@@ -35,15 +36,17 @@ def top_accuracy(output, target, topk=(1,)):
             res.append(correct_k)
         return res
     
-def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, criterion, loss_mask=None):
+def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, criterion, jacobi_token_nums, discount=1):
     # cross entropy -> sample distribution difference
     target_p = nn.Softmax(dim=2)(target_logits)
     out_logp = nn.LogSoftmax(dim=2)(jacobi_logits)
     plogp = target_p * out_logp
+    plogp = plogp.view(-1, jacobi_token_nums, plogp.shape[-1])
     ploss = -torch.sum(plogp) / (target_p.shape[0] * target_p.shape[1] + 1e-5)  # Normalize by batch and sequence
 
     # regression -> hidden states difference
     vloss = criterion(jacobi_hidden_states, hidden_state_target)
+    vloss = vloss.view(-1, jacobi_token_nums, vloss.shape[-1])
     vloss = torch.mean(vloss, dim=2)  # Shape: [batch, sequence]
     vloss = torch.sum(vloss) / (vloss.shape[0] * vloss.shape[1] + 1e-5)
 
@@ -222,7 +225,7 @@ for epoch in range(num_epochs + 1):
                             output_hidden_states=True,
                             return_dict=True)
             with torch.no_grad():
-                target_head = model.lm_head(data["hidden_state_target"])
+                target_head = model.lm_head(data["hidden_state_target"])  # [sum(jacobi_token * sets), logits]
                 target_head = target_head.detach()
             
             if debug_mode:
@@ -250,11 +253,10 @@ for epoch in range(num_epochs + 1):
 
             # record total generated top_k tokens
             K = 3
-            top_k = output['jacobi_logits'].argsort(dim=-1, descending=True)[:, :, :K]  # [bs, jacobi_tokens * sets, top_k]
-            bs, seq, k = top_k.shape
+            top_k = output['jacobi_logits'].argsort(dim=-1, descending=True)[:, :K]  # [jacobi_tokens * sets, top_k]
+            seq, k = top_k.shape
             sets = seq // jacobi_token_nums
-            top_k_group = top_k.view(bs, sets, jacobi_token_nums, k)
-            top_k = top_k_group.reshape(-1, jacobi_token_nums, k)
+            top_k = top_k.view(sets, jacobi_token_nums, k)
             top_k = top_k.permute(1, 0, 2).reshape(jacobi_token_nums, -1)
             for seq_idx, ith_data in enumerate(top_k):
                 c = torch.bincount(ith_data)
@@ -262,11 +264,15 @@ for epoch in range(num_epochs + 1):
                 counts[seq_idx, ids] += c[ids]
 
             if batch_idx % 1000 == 0:
-                for bs_num in range(target_head.shape[0]):
-                    print(f"top_3 tokens of batch {bs_num}:")
-                    for i, distribution in enumerate(output['jacobi_logits'][bs_num][:jacobi_token_nums]):
+                target_ids = data['target'].view(-1, jacobi_token_nums)
+                target_jacobi_logits = target_head.view(-1, jacobi_token_nums, target_head.shape[-1])
+                output_jacobi_logits = output['jacobi_logits'].view(-1, jacobi_token_nums, output['jacobi_logits'].shape[-1])
+                
+                for group_num in range(min(target_jacobi_logits.shape[0], 3)):
+                    print(f"top_3 tokens of group {group_num}:")
+                    for i, distribution in enumerate(output_jacobi_logits[group_num][:jacobi_token_nums]):
                         top_3 = distribution.argsort(descending=True)[:3]
-                        target_decode = tokenizer.decode(data['target'][bs_num][i])
+                        target_decode = tokenizer.decode(target_ids[group_num][i])
                         target_decode = "\\n" if target_decode == '\n' else target_decode
                         report = f"<[{i}-Target]{target_decode}>, "
                         for idx, token in enumerate(top_3):
@@ -285,7 +291,7 @@ for epoch in range(num_epochs + 1):
                     report = report[:-2] + "\n"
                 print(report)
 
-            vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion)#, loss_mask)
+            vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
             loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
             # loss.backward()
             accelerator.backward(loss)
@@ -295,14 +301,12 @@ for epoch in range(num_epochs + 1):
                 scheduler.step()
 
         with torch.no_grad():
-            _, predicted = torch.max(output['jacobi_logits'], 2)
-            _, target = torch.max(target_head, 2)
-            bs = predicted.shape[0]
-            sets = predicted.shape[1] // jacobi_token_nums
-            ct = bs * sets
+            _, predicted = torch.max(output['jacobi_logits'], -1)
+            _, target = torch.max(target_head, -1)
+            ct = predicted.shape[0] // jacobi_token_nums
             cc = (predicted == target) 
 
-            topkacc = top_accuracy(output['jacobi_logits'], target, (1, 2, 3))
+            topkacc = top_accuracy(output['jacobi_logits'], target, jacobi_token_nums, (1, 2, 3))
             for i, cor_seq in enumerate(topkacc):
                 cor_seq = cor_seq.view(-1, jacobi_token_nums)
                 cor_seq = cor_seq.sum(0)
@@ -354,21 +358,19 @@ for epoch in range(num_epochs + 1):
                 target_head = model.lm_head(data["hidden_state_target"])
                 target_head = target_head.detach()
             
-                vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion)#, loss_mask)
+                vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
                 loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
             
                 _, predicted = torch.max(output['jacobi_logits'], 2)
                 _, target = torch.max(target_head, 2)
-                bs = predicted.shape[0]
-                sets = predicted.shape[1] // jacobi_token_nums
-                ct = bs * sets
+                ct = predicted.shape[0] // jacobi_token_nums
                 cc = (predicted == target) 
 
-                topkacc = top_accuracy(output['jacobi_logits'], target, (1, 2, 3))
+                topkacc = top_accuracy(output['jacobi_logits'], target, jacobi_token_nums, (1, 2, 3))
                 for i, cor_seq in enumerate(topkacc):
+                    cor_seq = cor_seq.view(-1, jacobi_token_nums)
+                    cor_seq = cor_seq.sum(0)
                     for seq_id in range(len(cor_seq)):
-                        cor_seq = cor_seq.view(-1, jacobi_token_nums)
-                        cor_seq = cor_seq.sum(0)
                         top_3acc[i][seq_id] += topkacc[i][seq_id]
                 total += ct
 

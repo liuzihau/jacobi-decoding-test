@@ -423,19 +423,29 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
+        hidden_dim = hidden_states.shape[-1]
+        logits_dim = logits.shape[-1]
 
-        jacobi_hidden_states = []
-        jacobi_logits = []
         # Iterate through the batch dimension
+        jacobi_hidden_states, jacobi_logits = [], []
+        # max_sequence = 0
         for i in range(hidden_states.shape[0]):
             replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
-            # lm_hidden_states = hidden_states[:, :-self.jacobi_token_nums, :]
+            # curr_sequence = replace_indices.shape[0]
+            # if curr_sequence> max_sequence:
+            #     max_sequence = curr_sequence
             jacobi_hidden_states.append(hidden_states[i, replace_indices, :])
-
-            # lm_logits = logits[:, :-self.jacobi_token_nums, :]
             jacobi_logits.append(logits[i, replace_indices, :])
-        jacobi_hidden_states = torch.stack(jacobi_hidden_states, dim=0)
-        jacobi_logits = torch.stack(jacobi_logits, dim=0)
+        
+        # for i in range(jacobi_hidden_states):
+        #     curr_sequence = jacobi_hidden_states[i].shape[0]
+        #     if curr_sequence < max_sequence:
+        #         seq_pad_hidden = torch.zeros((1, (max_sequence - curr_sequence), hidden_dim)) 
+        #         seq_pad_target = torch.zeros((1, (max_sequence - curr_sequence), logits_dim))
+        #         jacobi_hidden_states[i] = torch.cat([jacobi_hidden_states[i], seq_pad_hidden], dim=0)
+        #         jacobi_logits[i] = torch.cat([jacobi_logits[i], seq_pad_target], dim=0)
+        jacobi_hidden_states = torch.cat(jacobi_hidden_states, dim=0)
+        jacobi_logits = torch.cat(jacobi_logits, dim=0)
         
         # loss = None
         # if labels is not None:

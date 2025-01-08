@@ -86,10 +86,12 @@ class CustomDataset(Dataset):
             hidden_states = self.transform(hidden_states)
 
         new_data["input_ids"] = input_ids[None, :]
-        new_data["target"] = input_ids_target[None, :]
+        # new_data["target"] = input_ids_target[None, :]
+        new_data["target"] = input_ids_target
         new_data["attention_mask"] = attention_mask
         new_data["loss_mask"] = loss_mask
-        new_data["hidden_state_target"] = hidden_states[None, :]
+        # new_data["hidden_state_target"] = hidden_states[None, :]
+        new_data["hidden_state_target"] = hidden_states
 
         return new_data
 
@@ -121,20 +123,22 @@ class DataCollatorWithPadding:
         batch_loss_mask = torch.tensor(
             [item['loss_mask'] + [0] * (max_length - len(item['loss_mask'])) for item in features])
 
-        max_hidden_counts = max(item['hidden_state_target'].shape[1] for item in features)
-        hidden_dim, hidden_dtype, hidden_device = features[0]['hidden_state_target'].shape[-1], features[0]['hidden_state_target'].dtype, features[0]['hidden_state_target'].device
-        target_dtype, target_device = features[0]['target'].dtype, features[0]['target'].device
-        for item in features:
-            curr_seq = item['hidden_state_target'].shape[1]
-            if curr_seq < max_hidden_counts:
-                seq_pad_hidden = torch.zeros((1, (max_hidden_counts - curr_seq), hidden_dim), dtype=hidden_dtype, device=hidden_device) 
-                seq_pad_target = torch.zeros((1, (max_hidden_counts - curr_seq)), dtype=target_dtype, device=target_device)
-                item['hidden_state_target'] = torch.cat([item['hidden_state_target'], seq_pad_hidden], dim=1)
-                item['target'] = torch.cat([item['target'], seq_pad_target], dim=1)
+        # max_hidden_counts = max(item['hidden_state_target'].shape[1] for item in features)
+        # hidden_dim, hidden_dtype, hidden_device = features[0]['hidden_state_target'].shape[-1], features[0]['hidden_state_target'].dtype, features[0]['hidden_state_target'].device
+        # target_dtype, target_device = features[0]['target'].dtype, features[0]['target'].device
+        # for item in features:
+        #     curr_seq = item['hidden_state_target'].shape[1]
+        #     if curr_seq < max_hidden_counts:
+        #         seq_pad_hidden = torch.zeros((1, (max_hidden_counts - curr_seq), hidden_dim), dtype=hidden_dtype, device=hidden_device) 
+        #         seq_pad_target = torch.zeros((1, (max_hidden_counts - curr_seq)), dtype=target_dtype, device=target_device)
+        #         item['hidden_state_target'] = torch.cat([item['hidden_state_target'], seq_pad_hidden], dim=1)
+        #         item['target'] = torch.cat([item['target'], seq_pad_target], dim=1)
+
         # batch_loss_mask = torch.ones_like(batch_loss_mask)
         # batch_attention_mask=torch.ones_like(batch_attention_mask)
         batch = {
             "input_ids": batch_input_ids,
+            # "hidden_state_target": torch.cat([item['hidden_state_target'] for item in features]),
             "hidden_state_target": torch.cat([item['hidden_state_target'] for item in features]),
             "target": torch.cat([item['target'] for item in features]),
             "attention_mask": batch_attention_mask,
