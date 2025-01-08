@@ -273,11 +273,11 @@ for epoch in range(num_epochs + 1):
                     for i, distribution in enumerate(output_jacobi_logits[group_num][:jacobi_token_nums]):
                         top_3 = distribution.argsort(descending=True)[:3]
                         target_decode = tokenizer.decode(target_ids[group_num][i])
-                        target_decode = "\\n" if target_decode == '\n' else target_decode
+                        target_decode = target_decode.replace('\n', '\\n') if '\n' in target_decode else target_decode
                         report = f"<[{i}-Target]{target_decode}>, "
                         for idx, token in enumerate(top_3):
                             decode = tokenizer.decode([token])
-                            decode = "\\n" if decode == '\n' else decode
+                            decode = decode.replace('\n', '\\n') if '\n' in decode else decode
                             report += f"<[{i}-{idx+1}]{decode}>, "
                         print(report)
                 top_5 = counts.argsort(dim=-1, descending=True)[:, :5]
@@ -286,7 +286,7 @@ for epoch in range(num_epochs + 1):
                     report += f"[token {seq_id}] "
                     for i, token in enumerate(seq_data):
                         decode = tokenizer.decode([token])
-                        decode = "\\n" if decode == '\n' else decode
+                        decode = decode.replace('\n', '\\n') if '\n' in decode else decode
                         report += f"<top {i+1}: {decode}({counts[seq_id, token]} times)>, "
                     report = report[:-2] + "\n"
                 print(report)
@@ -358,7 +358,6 @@ for epoch in range(num_epochs + 1):
                 target_head = model.lm_head(data["hidden_state_target"])
                 target_head = target_head.detach()
 
-                print(output['jacobi_logits'].shape, target_head.shape, data["loss_mask"].sum(0).sum(1))
                 
                 vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
                 loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
