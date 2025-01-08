@@ -42,12 +42,12 @@ def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacob
     out_logp = nn.LogSoftmax(dim=-1)(jacobi_logits)
     plogp = target_p * out_logp
     plogp = plogp.view(-1, jacobi_token_nums, plogp.shape[-1])
-    ploss = -torch.sum(plogp) / (target_p.shape[0] * target_p.shape[1] + 1e-5)  # Normalize by batch and sequence
+    ploss = -torch.sum(plogp) / (plogp.shape[0] * plogp.shape[1] + 1e-5)  # Normalize by batch and sequence
 
     # regression -> hidden states difference
     vloss = criterion(jacobi_hidden_states, hidden_state_target)
     vloss = vloss.view(-1, jacobi_token_nums, vloss.shape[-1])
-    vloss = torch.mean(vloss, dim=-1)  # Shape: [batch, sequence]
+    vloss = torch.mean(vloss, dim=-1)  
     vloss = torch.sum(vloss) / (vloss.shape[0] * vloss.shape[1] + 1e-5)
 
     return vloss, ploss
@@ -362,8 +362,8 @@ for epoch in range(num_epochs + 1):
                 vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
                 loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
             
-                _, predicted = torch.max(output['jacobi_logits'], 2)
-                _, target = torch.max(target_head, 2)
+                _, predicted = torch.max(output['jacobi_logits'], -1)
+                _, target = torch.max(target_head, -1)
                 ct = predicted.shape[0] // jacobi_token_nums
                 cc = (predicted == target) 
 
