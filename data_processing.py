@@ -121,6 +121,16 @@ class DataCollatorWithPadding:
         batch_loss_mask = torch.tensor(
             [item['loss_mask'] + [0] * (max_length - len(item['loss_mask'])) for item in features])
 
+        max_hidden_counts = max(item['hidden_state_target'].shape[1] for item in features)
+        hidden_dim, hidden_dtype, hidden_device = features[0]['hidden_state_target'].shape[-1], features[0]['hidden_state_target'].dtype, features[0]['hidden_state_target'].device
+        target_dtype, target_device = features[0]['target'].dtype, features[0]['target'].device
+        for item in features:
+            curr_seq = item['hidden_state_target'].shape[1]
+            if curr_seq < max_hidden_counts:
+                seq_pad_hidden = torch.zeros((1, (max_hidden_counts - curr_seq), hidden_dim), dtype=hidden_dtype, device=hidden_device) 
+                seq_pad_target = torch.zeros((1, (max_hidden_counts - curr_seq)), dtype=target_dtype, device=target_device)
+                item['hidden_state_target'] = torch.cat([item['hidden_state_target'], seq_pad_hidden], dim=1)
+                item['target'] = torch.cat([item['target'], seq_pad_target], dim=1)
         # batch_loss_mask = torch.ones_like(batch_loss_mask)
         # batch_attention_mask=torch.ones_like(batch_attention_mask)
         batch = {

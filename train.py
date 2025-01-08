@@ -297,11 +297,15 @@ for epoch in range(num_epochs + 1):
         with torch.no_grad():
             _, predicted = torch.max(output['jacobi_logits'], 2)
             _, target = torch.max(target_head, 2)
-            ct = predicted.shape[0]
+            bs = predicted.shape[0]
+            sets = predicted.shape[1] // jacobi_token_nums
+            ct = bs * sets
             cc = (predicted == target) 
 
             topkacc = top_accuracy(output['jacobi_logits'], target, (1, 2, 3))
             for i, cor_seq in enumerate(topkacc):
+                cor_seq = cor_seq.view(-1, jacobi_token_nums)
+                cor_seq = cor_seq.sum(0)
                 for seq_id in range(len(cor_seq)):
                     top_3acc[i][seq_id] += topkacc[i][seq_id]
             total += ct
@@ -355,12 +359,16 @@ for epoch in range(num_epochs + 1):
             
                 _, predicted = torch.max(output['jacobi_logits'], 2)
                 _, target = torch.max(target_head, 2)
-                ct = predicted.shape[0]
+                bs = predicted.shape[0]
+                sets = predicted.shape[1] // jacobi_token_nums
+                ct = bs * sets
                 cc = (predicted == target) 
 
                 topkacc = top_accuracy(output['jacobi_logits'], target, (1, 2, 3))
                 for i, cor_seq in enumerate(topkacc):
                     for seq_id in range(len(cor_seq)):
+                        cor_seq = cor_seq.view(-1, jacobi_token_nums)
+                        cor_seq = cor_seq.sum(0)
                         top_3acc[i][seq_id] += topkacc[i][seq_id]
                 total += ct
 
