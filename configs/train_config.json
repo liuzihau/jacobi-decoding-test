@@ -14,7 +14,7 @@
     "adapter_type": "Qwen2MLP",
     "initialise_method": "kaiming",
     "adapter_kwargs":{
-        "intermediate_ratio": 3
+        "intermediate_ratio": null
     },
     "shared_adapter": false,
     "shared_jacobi_token": true,
