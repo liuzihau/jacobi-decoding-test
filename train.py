@@ -137,6 +137,7 @@ if accelerator.is_main_process:
     wandb.login(key=train_config["api_key"])
     wandb.init(project=PROJECT, name=train_config["name"], config=train_config)
 
+adapter_kwargs = train_config["adapter_kwargs"]
 tokenizer = Qwen2Tokenizer.from_pretrained(train_config["basepath"], use_fast=False)
 model = Qwen2JacobiForCausalLM.from_pretrained(
     pretrained_model_name_or_path=train_config["basepath"],
@@ -146,6 +147,7 @@ model = Qwen2JacobiForCausalLM.from_pretrained(
     adapter_type=train_config["adapter_type"],
     shared_adapter=train_config["shared_adapter"],
     shared_jacobi_token=train_config["shared_jacobi_token"],
+    adapter_kwargs=adapter_kwargs,
     torch_dtype="auto",
     device_map="auto"
 )
@@ -272,7 +274,9 @@ for epoch in range(num_epochs + 1):
                 target_jacobi_logits = target_head.view(-1, jacobi_token_nums, target_head.shape[-1])
                 output_jacobi_logits = output['jacobi_logits'].view(-1, jacobi_token_nums, output['jacobi_logits'].shape[-1])
                 
-                for group_num in range(min(target_jacobi_logits.shape[0], 3)):
+                sample_counts = min(target_jacobi_logits.shape[0], 3)
+                group_nums = torch.randint(low=0, high=target_jacobi_logits.shape[0], size=(sample_counts,)).tolist()
+                for group_num in group_nums:
                     print(f"top_3 tokens of group {group_num}:")
                     for i, distribution in enumerate(output_jacobi_logits[group_num][:jacobi_token_nums]):
                         top_3 = distribution.argsort(descending=True)[:3]

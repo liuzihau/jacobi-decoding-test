@@ -153,3 +153,4 @@ def speculative_decoding(
     out = out[batch_range, seq_len_range + num_pad_left[..., None]]
 
     return out[..., prompt_seq_len:], total_accepted / num_steps
+

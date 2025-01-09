@@ -1,5 +1,5 @@
 {
-    "name": "test-9",
+    "name": "test-10",
     "api_key": "",
     "basepath_local": "./Qwen2.5-0.5B-Instruct",
     "basepath":"/content/drive/MyDrive/LLMs_weight/qwen/checkpoints/Qwen2.5-0.5B-Instruct",
@@ -13,6 +13,9 @@
     "projection_frequency": 4,
     "adapter_type": "Qwen2MLP",
     "initialise_method": "kaiming",
+    "adapter_kwargs":{
+        "intermediate_ratio": 3
+    },
     "shared_adapter": false,
     "shared_jacobi_token": true,
     "train_data_portion": 0.005,

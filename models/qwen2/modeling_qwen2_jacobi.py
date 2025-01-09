@@ -24,10 +24,10 @@ class JacobiCausalLMOutputWithPast(ModelOutput):
 
 
 class Qwen2MLP(nn.Module):
-    def __init__(self, input_size, output_size, intermediate_size=None):
+    def __init__(self, input_size, output_size, intermediate_ratio=None):
         super().__init__()
         self.input_size = input_size
-        self.intermediate_size = intermediate_size if intermediate_size is not None else input_size * 2
+        self.intermediate_size = int(input_size * intermediate_ratio) if intermediate_ratio is not None else input_size * 2
         self.hidden_size = output_size
         self.gate_proj = nn.Linear(self.input_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.input_size, self.intermediate_size, bias=False)
@@ -53,9 +53,9 @@ class BasicLinear(nn.Module):
         return x
 
 class ProjectionQwen2MLP(nn.Module):
-    def __init__(self, input_size, output_size, intermediate_size=None, layers=1):
+    def __init__(self, input_size, output_size, intermediate_ratio=None, layers=1):
         super().__init__()
-        self.module_list = nn.ModuleList([Qwen2MLP(input_size, output_size, intermediate_size) for _ in range(layers)])
+        self.module_list = nn.ModuleList([Qwen2MLP(input_size, output_size, intermediate_ratio) for _ in range(layers)])
     
     def forward(self, hidden_state, idx):
         return self.module_list[idx](hidden_state) 
@@ -72,7 +72,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     
-    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4, adapter_type='Linear', shared_adapter=True, shared_jacobi_token=True):
+    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4, adapter_type='Linear', shared_adapter=True, shared_jacobi_token=True, adapter_kwargs=None):
         super().__init__(config)
         self.confg = config
         self.model = Qwen2Model(config)
@@ -81,7 +81,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.proj_freq = proj_freq
         self.jacobi_token_nums = jacobi_token_nums
         self.shared_adapter = shared_adapter
-        self.shared_jacobi_token = shared_jacobi_token        
+        self.shared_jacobi_token = shared_jacobi_token
         
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         
@@ -99,7 +99,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             adapter_layers = 1
         else:
             adapter_layers = attn_layers // self.proj_freq
-        self.adapters = nn.ModuleList([adapter_module((n+2)*attn_hidden_size, attn_hidden_size, layers=adapter_layers) for n in range(mix_sequences)])
+        adapter_kwargs = {} if adapter_kwargs is None else adapter_kwargs        
+        self.adapters = nn.ModuleList([adapter_module((n+2)*attn_hidden_size, attn_hidden_size, layers=adapter_layers, **adapter_kwargs) for n in range(mix_sequences)])
         
 
         temp_weight = torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5
