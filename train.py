@@ -11,6 +11,7 @@ from torch import nn, optim
 from transformers import AutoConfig, get_linear_schedule_with_warmup
 from accelerate import Accelerator
 from accelerate.utils import set_seed
+from safetensors import safe_open
 
 from data_processing import CustomDataset, DataCollatorWithPadding, list_files
 from models.qwen2.modeling_qwen2_jacobi import Qwen2JacobiForCausalLM
@@ -151,6 +152,7 @@ model = Qwen2JacobiForCausalLM.from_pretrained(
     torch_dtype="auto",
     device_map="auto"
 )
+
 
 model = model.to('cuda')
 for param in model.model.parameters():
@@ -300,6 +302,9 @@ for epoch in range(num_epochs + 1):
                 print(report)
 
             vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
+            if torch.isnan(vloss).any() or torch.isnan(ploss).any():
+                print(f"loss contain nan : {data['filename']}")
+                continue
             loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
             # loss.backward()
             accelerator.backward(loss)

@@ -91,6 +91,7 @@ class CustomDataset(Dataset):
         new_data["loss_mask"] = loss_mask
         # new_data["hidden_state_target"] = hidden_states[None, :]
         new_data["hidden_state_target"] = hidden_states
+        new_data["filename"] = self.data[index]
 
         return new_data
 
@@ -141,7 +142,8 @@ class DataCollatorWithPadding:
             "hidden_state_target": torch.cat([item['hidden_state_target'] for item in features]),
             "target": torch.cat([item['target'] for item in features]),
             "attention_mask": batch_attention_mask,
-            "loss_mask": batch_loss_mask
+            "loss_mask": batch_loss_mask,
+            "filename": [item['filename'] for item in features]
         }
         return batch
 
