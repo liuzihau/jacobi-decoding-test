@@ -161,8 +161,12 @@ for name, param in model.named_parameters():
 
 # data part
 datapath = list_files(train_config["datapath"])
-traindatapath = datapath[:int(len(datapath) * 0.95)]
-testdatapath = datapath[int(len(datapath) * 0.95):]
+traindatapath = datapath[:int(len(datapath) * train_config["train_data_portion"])]
+if train_config["train_data_portion"] > 0.9:
+    testdatapath = datapath[int(len(datapath) * train_config["train_data_portion"]):]
+else:
+    testdatapath = datapath[int(len(datapath) * 0.999):]
+
 
 shuffle_data = True
 if train_config["debug_mode"]:
