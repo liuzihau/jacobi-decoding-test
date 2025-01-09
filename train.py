@@ -137,7 +137,7 @@ if accelerator.is_main_process:
     wandb.login(key=train_config["api_key"])
     wandb.init(project=PROJECT, name=train_config["name"], config=train_config)
 
-adapter_kwargs = train_config["adapter_kwargs"]
+jacobi_adapter_kwargs = train_config["jacobi_adapter_kwargs"]
 tokenizer = Qwen2Tokenizer.from_pretrained(train_config["basepath"], use_fast=False)
 model = Qwen2JacobiForCausalLM.from_pretrained(
     pretrained_model_name_or_path=train_config["basepath"],
@@ -147,7 +147,7 @@ model = Qwen2JacobiForCausalLM.from_pretrained(
     adapter_type=train_config["adapter_type"],
     shared_adapter=train_config["shared_adapter"],
     shared_jacobi_token=train_config["shared_jacobi_token"],
-    adapter_kwargs=adapter_kwargs,
+    jacobi_adapter_kwargs=jacobi_adapter_kwargs,
     torch_dtype="auto",
     device_map="auto"
 )

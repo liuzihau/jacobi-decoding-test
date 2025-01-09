@@ -72,7 +72,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     
-    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4, adapter_type='Linear', shared_adapter=True, shared_jacobi_token=True, adapter_kwargs=None):
+    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4, adapter_type='Linear', shared_adapter=True, shared_jacobi_token=True, jacobi_adapter_kwargs=None):
         super().__init__(config)
         self.confg = config
         self.model = Qwen2Model(config)
@@ -99,10 +99,9 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             adapter_layers = 1
         else:
             adapter_layers = attn_layers // self.proj_freq
-        adapter_kwargs = {} if adapter_kwargs is None else adapter_kwargs        
-        self.adapters = nn.ModuleList([adapter_module((n+2)*attn_hidden_size, attn_hidden_size, layers=adapter_layers, **adapter_kwargs) for n in range(mix_sequences)])
+        jacobi_adapter_kwargs = {} if jacobi_adapter_kwargs is None else jacobi_adapter_kwargs        
+        self.adapters = nn.ModuleList([adapter_module((n+2)*attn_hidden_size, attn_hidden_size, layers=adapter_layers, **jacobi_adapter_kwargs) for n in range(mix_sequences)])
         
-
         temp_weight = torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5
         temp_weight = temp_weight.to(dtype=torch.bfloat16)  # can be remove?
 

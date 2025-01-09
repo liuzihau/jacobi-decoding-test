@@ -13,7 +13,7 @@
     "projection_frequency": 4,
     "adapter_type": "Qwen2MLP",
     "initialise_method": "kaiming",
-    "adapter_kwargs":{
+    "jacobi_adapter_kwargs":{
         "intermediate_ratio": null
     },
     "shared_adapter": false,
