@@ -318,7 +318,7 @@ for epoch in range(num_epochs + 1):
                     top_3acc[i][seq_id] += topkacc[i][seq_id]
             total += ct
 
-        if accelerator.is_main_process and ct != 0 and batch_idx > 20:
+        if accelerator.is_main_process and ct != 0:
             logdict = {"train/lr": optimizer.optimizer.param_groups[0]["lr"], "train/vloss": vloss.item(),
                        "train/ploss": ploss.item(), "train/loss": loss.item(), "train/acc": cc / ct}
             for id, i in enumerate(top_3acc):
