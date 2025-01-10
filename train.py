@@ -58,6 +58,11 @@ def top_accuracy(output, target, jacobi_token_nums, topk=(1,)):
         return res
     
 def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, criterion, jacobi_token_nums, discount=1):
+    target_logits = torch.clamp(target_logits, min=-10, max=10)
+    jacobi_logits = torch.clamp(jacobi_logits, min=-10, max=10)
+    jacobi_hidden_states = torch.clamp(jacobi_hidden_states, min=-1e3, max=1e3)
+    hidden_state_target = torch.clamp(hidden_state_target, min=-1e3, max=1e3)
+
     # cross entropy -> sample distribution difference
     target_p = nn.Softmax(dim=-1)(target_logits)
     out_logp = nn.LogSoftmax(dim=-1)(jacobi_logits)
@@ -320,6 +325,8 @@ for epoch in range(num_epochs + 1):
             vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
             if torch.isnan(vloss).any() or torch.isnan(ploss).any():
                 print(f"loss contain nan : {data['filename']}")
+                optimizer.zero_grad()
+                optimizer.state = {}  # Reset optimizer states
                 continue
             loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
             # loss.backward()
