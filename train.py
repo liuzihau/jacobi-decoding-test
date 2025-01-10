@@ -17,6 +17,26 @@ from data_processing import CustomDataset, DataCollatorWithPadding, list_files
 from models.qwen2.modeling_qwen2_jacobi import Qwen2JacobiForCausalLM
 from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
+def load_jacobi_weight(model, cpdir):
+    with safe_open(cpdir, framework="pt") as f:
+        keys = f.keys()        
+        for name, param in model.named_parameters():
+            all_set = True
+            if "model." in name:
+                continue
+            if name in keys:
+                tensor_slice = f.get_slice(name)
+                tensor = tensor_slice[:].clone().detach()
+                if tensor.shape == param.shape:
+                    param.data.copy_(tensor) 
+                else:
+                    print(f"Shape mismatch for {name}: Model shape {param.shape}, File shape {tensor.shape}")
+            else:
+                all_set = False
+                print(f"Key {name} not found in SafeTensor file.")
+        if all_set:
+            print("All parameters has been loaded.")
+
 
 def top_accuracy(output, target, jacobi_token_nums, topk=(1,)):
     # output.shape (bs, num_classes), target.shape (bs, )
@@ -166,19 +186,15 @@ for name, param in model.named_parameters():
 # data part
 datapath = list_files(train_config["datapath"])
 traindatapath = datapath[:int(len(datapath) * train_config["train_data_portion"])]
-if train_config["train_data_portion"] > 0.9:
-    testdatapath = datapath[int(len(datapath) * train_config["train_data_portion"]):]
-else:
-    testdatapath = datapath[int(len(datapath) * 0.999):]
-
+testdatapath = datapath[int(len(datapath) * train_config["test_data_portion"]):]
 
 shuffle_data = True
 if train_config["debug_mode"]:
     shuffle_data = False
     traindatapath = datapath[:4]
     testdatapath = datapath[int(len(datapath) * 0.1):int(len(datapath) * 0.15)]
-    print(f"train data: {len(traindatapath)}")
-    print(f"test data: {len(testdatapath)}")
+print(f"train data: {len(traindatapath)}")
+print(f"test data: {len(testdatapath)}")
 
 traindataset = CustomDataset(traindatapath, jacobi_tokens=train_config["jacobi_token_nums"], use_multi_token_sets=train_config["use_multi_token_sets"], pad_id=train_config['pad_token_id'], vocab_size=model_config['vocab_size'])
 testdataset = CustomDataset(testdatapath, jacobi_tokens=train_config["jacobi_token_nums"], use_multi_token_sets=train_config["use_multi_token_sets"], pad_id=train_config['pad_token_id'], vocab_size=model_config['vocab_size'])
