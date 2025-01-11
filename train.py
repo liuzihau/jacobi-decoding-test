@@ -18,6 +18,20 @@ from data_processing import CustomDataset, DataCollatorWithPadding, list_files
 from models.qwen2.modeling_qwen2_jacobi import Qwen2JacobiForCausalLM
 from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
+def output_abnormal_message(target_p, output_logp, jacobi_hidden_states, target_hidden_state, pshape0, pshape1, vshape0, vshape1):
+    report = ""
+    report += f"[target_p contain inf]: {torch.isinf(target_p).any()}\n"
+    report += f"[target_hidden contain inf]: {torch.isinf(target_hidden_state).any()}\n"                
+    report += f"[output_logp contain inf]: {torch.isinf(output_logp).any()}\n"
+    report += f"[output_hidden contain inf]: {torch.isinf(jacobi_hidden_states).any()}\n"
+    report += f"[target_p contain nan]: {torch.isnan(target_p).any()}\n"
+    report += f"[target_hidden contain nan]: {torch.isnan(target_hidden_state).any()}\n"                
+    report += f"[output_logp contain nan]: {torch.isnan(output_logp).any()}\n"
+    report += f"[output_hidden contain nan]: {torch.isnan(jacobi_hidden_states).any()}\n"
+    report += f"[pshape]: {pshape0}, {pshape1}\n"
+    report += f"[vshape]: {vshape0}, {vshape1}"
+    return report
+
 def load_jacobi_weight(model, cpdir):
     with safe_open(cpdir, framework="pt") as f:
         keys = f.keys()        
@@ -72,12 +86,12 @@ def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacob
     ploss = -torch.sum(plogp) / (plogp.shape[0] * plogp.shape[1] + 1e-5)  # Normalize by batch and sequence
 
     # regression -> hidden states difference
-    vloss = criterion(jacobi_hidden_states, hidden_state_target)
-    vloss = vloss.view(-1, jacobi_token_nums, vloss.shape[-1])
-    vloss = torch.mean(vloss, dim=-1)  
-    vloss = torch.sum(vloss) / (vloss.shape[0] * vloss.shape[1] + 1e-5)
+    vloss_full = criterion(jacobi_hidden_states, hidden_state_target)
+    vloss_full = vloss_full.view(-1, jacobi_token_nums, vloss_full.shape[-1])
+    vloss_full = torch.mean(vloss_full, dim=-1)  
+    vloss = torch.sum(vloss_full) / (vloss_full.shape[0] * vloss_full.shape[1] + 1e-5)
 
-    return vloss, ploss, target_p, out_logp, plogp.shape[0], plogp.shape[1], vloss.shape[0], vloss.shape[1]
+    return vloss, ploss, target_p, out_logp, plogp.shape[0], plogp.shape[1], vloss_full.shape[0], vloss_full.shape[1]
 
 def cllm_loss():
     ### compute AutoRegression loss ###
@@ -238,20 +252,20 @@ else:
 
 if train_config["statepath"] is not None:
     # Load accelerator state
-    print("Loading model, optimizer, and scheduler states...")
+    print("Loading model, optimizer, and scheduler states in {train_config['statepath']}")
     accelerator.load_state(train_config["statepath"])
 
     # Restore random states
-    random_state_file = os.path.join(train_config["statepath"], "random_states_0.pkl")
-    with open(random_state_file, "rb") as f:
-        random_states = pickle.load(f)
+    # random_state_file = os.path.join(train_config["statepath"], "random_states_0.pkl")
+    # with open(random_state_file, "rb") as f:
+    #     random_states = pickle.load(f)
 
-    torch.random.set_rng_state(random_states["torch"])
-    torch.cuda.random.set_rng_state(random_states["cuda"])
+    # torch.random.set_rng_state(random_states["torch"])
+    # torch.cuda.random.set_rng_state(random_states["cuda"])
 
     print("State restored successfully!")
 
-
+continuous_loss_nan = 0
 epoch_counts = []
 for epoch in range(num_epochs + 1):
     top_3acc = [[0 for _ in range(jacobi_token_nums)] for _ in range(3)]
@@ -342,34 +356,23 @@ for epoch in range(num_epochs + 1):
             (
                 vloss, ploss, target_p, output_logp, pshape0, pshape1, vshape0, vshape1
                 ) = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
-            if torch.isnan(vloss).any() or torch.isnan(ploss).any():
-                print("\n")
-                print(f"loss contain nan : {data['filename']}")
-                report = ""
-                report += f"[target_p contain nan]: {torch.isnan(target_p).any()}\n"
-                report += f"[output_logp contain nan]: {torch.isnan(output_logp).any()}\n"
-                report += f"[output_hidden contain nan]: {torch.isnan(output['jacobi_hidden_states']).any()}\n"
-                report += f"[target_hidden contain nan]: {torch.isnan(data["hidden_state_target"]).any()}\n"                
-                report += f"[pshape]: {pshape0}, {pshape1}\n"
-                report += f"[vshape]: {vshape0}, {vshape1}"
-                print(report)
-                optimizer.zero_grad()
-                continue
-
-            elif torch.isinf(vloss).any() or torch.isinf(ploss).any():
-                print("\n")
-                print(f"loss contain inf : {data['filename']}")
-                report = ""
-                report += f"[target_p contain inf]: {torch.isinf(target_p).any()}\n"
-                report += f"[output_logp contain inf]: {torch.isinf(output_logp).any()}\n"
-                report += f"[output_hidden contain inf]: {torch.isinf(output['jacobi_hidden_states']).any()}\n"
-                report += f"[target_hidden contain inf]: {torch.isinf(data["hidden_state_target"]).any()}\n"                
-                report += f"[pshape]: {pshape0}, {pshape1}\n"
-                report += f"[vshape]: {vshape0}, {vshape1}"
-                print(report)
-                optimizer.zero_grad()
-                continue
             
+            if torch.isnan(vloss).any() or torch.isnan(ploss).any() or torch.isinf(vloss).any() or torch.isinf(ploss).any():
+                continuous_loss_nan += 1
+                print(f"loss contain nan : {data['filename']}")
+                report = output_abnormal_message(target_p, output_logp, output['jacobi_hidden_states'], data["hidden_state_target"], pshape0, pshape1, vshape0, vshape1)
+                print(report)
+                del ploss, vloss, target_head
+                gc.collect()
+                torch.cuda.empty_cache()
+                optimizer.zero_grad()
+                if continuous_loss_nan >= 3:
+                    break
+                continue
+            if continuous_loss_nan >= 3:
+                break
+            continuous_loss_nan = max(0, continuous_loss_nan-1)
+
             loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
             # loss.backward()
             accelerator.backward(loss)
@@ -409,7 +412,9 @@ for epoch in range(num_epochs + 1):
 
         if debug_mode and batch_idx % 500 == 0:
             print(torch.cuda.memory_summary(device='cuda', abbreviated=True), flush=True)
-
+    
+    if continuous_loss_nan >= 3:
+        break
     epoch_counts.append(counts)
     epoch_loss /= num_batches
     if accelerator.is_local_main_process:
