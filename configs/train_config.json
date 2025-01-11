@@ -3,7 +3,7 @@
     "api_key": "",
     "basepath_local": "./Qwen2.5-0.5B-Instruct",
     "basepath":"/content/drive/MyDrive/LLMs_weight/qwen/checkpoints/Qwen2.5-0.5B-Instruct",
-    "jacobimodelpath": "",
+    "statepath": "",
     "datapath": "/content/drive/MyDrive/datasets/ShareGPT_Vicuna_unfiltered_Qwen2.5-0.5B-Instruct",
     "cpdir": "/content/drive/MyDrive/jacobi_test_weights",
     "pad_token_id": 151643,

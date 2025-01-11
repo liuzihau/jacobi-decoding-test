@@ -1,6 +1,7 @@
 import os
 import gc
 import json
+import pickle
 from tqdm import tqdm
 import wandb
 
@@ -76,7 +77,7 @@ def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacob
     vloss = torch.mean(vloss, dim=-1)  
     vloss = torch.sum(vloss) / (vloss.shape[0] * vloss.shape[1] + 1e-5)
 
-    return vloss, ploss
+    return vloss, ploss, target_p, out_logp, plogp.shape[0], plogp.shape[1], vloss.shape[0], vloss.shape[1]
 
 def cllm_loss():
     ### compute AutoRegression loss ###
@@ -235,6 +236,22 @@ else:
         model, optimizer, train_loader, test_loader
     )
 
+if train_config["statepath"] is not None:
+    # Load accelerator state
+    print("Loading model, optimizer, and scheduler states...")
+    accelerator.load_state(train_config["statepath"])
+
+    # Restore random states
+    random_state_file = os.path.join(train_config["statepath"], "random_states_0.pkl")
+    with open(random_state_file, "rb") as f:
+        random_states = pickle.load(f)
+
+    torch.random.set_rng_state(random_states["torch"])
+    torch.cuda.random.set_rng_state(random_states["cuda"])
+
+    print("State restored successfully!")
+
+
 epoch_counts = []
 for epoch in range(num_epochs + 1):
     top_3acc = [[0 for _ in range(jacobi_token_nums)] for _ in range(3)]
@@ -322,11 +339,37 @@ for epoch in range(num_epochs + 1):
                     report = report[:-2] + "\n"
                 print(report)
 
-            vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
+            (
+                vloss, ploss, target_p, output_logp, pshape0, pshape1, vshape0, vshape1
+                ) = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
             if torch.isnan(vloss).any() or torch.isnan(ploss).any():
+                print("\n")
                 print(f"loss contain nan : {data['filename']}")
+                report = ""
+                report += f"[target_p contain nan]: {torch.isnan(target_p).any()}\n"
+                report += f"[output_logp contain nan]: {torch.isnan(output_logp).any()}\n"
+                report += f"[output_hidden contain nan]: {torch.isnan(output['jacobi_hidden_states']).any()}\n"
+                report += f"[target_hidden contain nan]: {torch.isnan(data["hidden_state_target"]).any()}\n"                
+                report += f"[pshape]: {pshape0}, {pshape1}\n"
+                report += f"[vshape]: {vshape0}, {vshape1}"
+                print(report)
                 optimizer.zero_grad()
                 continue
+
+            elif torch.isinf(vloss).any() or torch.isinf(ploss).any():
+                print("\n")
+                print(f"loss contain inf : {data['filename']}")
+                report = ""
+                report += f"[target_p contain inf]: {torch.isinf(target_p).any()}\n"
+                report += f"[output_logp contain inf]: {torch.isinf(output_logp).any()}\n"
+                report += f"[output_hidden contain inf]: {torch.isinf(output['jacobi_hidden_states']).any()}\n"
+                report += f"[target_hidden contain inf]: {torch.isinf(data["hidden_state_target"]).any()}\n"                
+                report += f"[pshape]: {pshape0}, {pshape1}\n"
+                report += f"[vshape]: {vshape0}, {vshape1}"
+                print(report)
+                optimizer.zero_grad()
+                continue
+            
             loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
             # loss.backward()
             accelerator.backward(loss)
@@ -394,7 +437,9 @@ for epoch in range(num_epochs + 1):
                 target_head = target_head.detach()
 
                 
-                vloss, ploss = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
+                (
+                    vloss, ploss, target_p, output_logp, pshape0, pshape1, vshape0, vshape1
+                    ) = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
                 loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
             
                 _, predicted = torch.max(output['jacobi_logits'], -1)
