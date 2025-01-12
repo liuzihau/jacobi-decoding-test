@@ -39,10 +39,11 @@ def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacob
     vloss = torch.sum(vloss_full) / (vloss_full.shape[0] * vloss_full.shape[1] + 1e-5)
 
     # Regularization term for Jacobi weight
-    reg_term = torch.sum(torch.abs(jacobi_weight)) / (jacobi_weight.shape[-1] + 1e-5)   # L1 regularization
+    reg_term_jacobi = torch.sum(torch.abs(jacobi_weight)) / (jacobi_weight.shape[-1] + 1e-5)   # L1 regularization
+    reg_term_hidden = torch.sum(jacobi_hidden_states ** 2) * (1/2) / (jacobi_hidden_states.shape[0] * jacobi_hidden_states.shape[1] + 1e-5)
     # reg_term = reg_lambda * torch.sum(jacobi_weight ** 2)  # L2 regularization
 
-    return vloss, ploss, reg_term
+    return vloss, ploss, reg_term_jacobi, reg_term_hidden
 
 
 CONFIG_PATH = '/content/jacobi-decoding-test/configs/train_config.json'
@@ -186,7 +187,7 @@ for epoch in range(num_epochs + 1):
                 for i, tensor in enumerate(output['jacobi_all_hidden_states']):
                     print(f"[layer {i}] contain nan: {torch.isnan(tensor).any()}")
                     print(tensor.numel(), torch.abs(tensor).max(), torch.abs(tensor).min(), torch.abs(tensor).sum())
-                    
+
                 gc.collect()
                 torch.cuda.empty_cache()
                 optimizer.zero_grad()
@@ -266,7 +267,7 @@ for epoch in range(num_epochs + 1):
                 print(report)
 
             
-            vloss, ploss, reg_term = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], model.jacobi_weight, criterion, jacobi_token_nums)
+            vloss, ploss, reg_term_jacobi, reg_term_hidden = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], model.jacobi_weight, criterion, jacobi_token_nums)
             
             # if torch.isnan(vloss).any() or torch.isnan(ploss).any() or torch.isinf(vloss).any() or torch.isinf(ploss).any():
             #     continuous_loss_nan += 1
@@ -282,7 +283,7 @@ for epoch in range(num_epochs + 1):
             #         break
             #     continue
 
-            loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss + train_config["r_w"] * reg_term
+            loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss + train_config["r_w"] * reg_term_jacobi + train_config["h_w"] * reg_term_hidden
             # loss.backward()
             accelerator.backward(loss)
             accelerator.clip_grad_value_(model.parameters(), train_config["grad_clip"])
@@ -306,7 +307,7 @@ for epoch in range(num_epochs + 1):
 
         if accelerator.is_main_process and ct != 0:
             logdict = {"train/lr": optimizer.optimizer.param_groups[0]["lr"], "train/vloss": vloss.item(),
-                       "train/ploss": ploss.item(), "train/rloss": reg_term.item(), "train/loss": loss.item(), "train/acc": cc / ct}
+                       "train/ploss": ploss.item(), "train/rloss": reg_term_jacobi.item(), "train/hloss": reg_term_hidden.item(), "train/loss": loss.item(), "train/acc": cc / ct}
             for id, i in enumerate(top_3acc):
                 for seq in range(len(i)):
                     logdict[f'train/top_{id + 1}_token_{seq}_acc'] = top_3acc[id][seq].item() / total
@@ -352,8 +353,8 @@ for epoch in range(num_epochs + 1):
                 target_head = target_head.detach()
 
                 
-                vloss, ploss, reg_term = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], model.jacobi_weight, criterion, jacobi_token_nums)
-                loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss + train_config["r_w"] * reg_term
+                vloss, ploss, reg_term_jacobi, reg_term_hidden = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], model.jacobi_weight, criterion, jacobi_token_nums)
+                loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss + train_config["r_w"] * reg_term_jacobi + train_config["h_w"] * reg_term_hidden
             
                 _, predicted = torch.max(output['jacobi_logits'], -1)
                 _, target = torch.max(target_head, -1)
@@ -369,7 +370,7 @@ for epoch in range(num_epochs + 1):
                 total += ct
 
             if accelerator.is_main_process and ct != 0:
-                logdict = {"test/vloss": vloss.item(), "test/ploss": ploss.item(), "test/rloss": reg_term.item(), "test/loss": loss.item(), "test/acc": cc / ct}
+                logdict = {"test/vloss": vloss.item(), "test/ploss": ploss.item(), "test/rloss": reg_term_jacobi.item(), "test/hloss": reg_term_hidden.item(), "test/loss": loss.item(), "test/acc": cc / ct}
             for id, i in enumerate(top_3acc):
                 for seq in range(len(i)):
                     logdict[f'test/top_{id + 1}_token_{seq}_acc'] = top_3acc[id][seq].item() / total
