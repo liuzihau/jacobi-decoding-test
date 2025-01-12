@@ -20,6 +20,7 @@ class JacobiCausalLMOutputWithPast(ModelOutput):
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     jacobi_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    jacobi_all_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
 
 
@@ -426,7 +427,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        all_hidden_states = outputs[2]
+        all_hidden_states = outputs["hidden_states"]
         logits = self.lm_head(hidden_states)
         hidden_dim = hidden_states.shape[-1]
         logits_dim = logits.shape[-1]
