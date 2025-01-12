@@ -27,7 +27,7 @@
     "num_epochs": 10,
     "num_warmup_steps": 10000,
     "total_steps": 209000,
-    "r_w": 1e-4,
+    "r_w": 1.0,
     "p_w": 0.2,
     "v_w": 1.0,
     "num_workers": 2,

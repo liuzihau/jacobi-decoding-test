@@ -182,6 +182,11 @@ for epoch in range(num_epochs + 1):
                         continue
                     print(f"[{name}] contain nan: {torch.isnan(param).any()}")
                     print(param.numel(), torch.abs(param).max(), torch.abs(param).min(), torch.abs(param).sum())
+
+                for i, tensor in enumerate(output['jacobi_all_hidden_states']):
+                    print(f"[layer {i}] contain nan: {torch.isnan(tensor).any()}")
+                    print(tensor.numel(), torch.abs(tensor).max(), torch.abs(tensor).min(), torch.abs(tensor).sum())
+                    
                 gc.collect()
                 torch.cuda.empty_cache()
                 optimizer.zero_grad()

@@ -35,7 +35,11 @@ class Qwen2MLP(nn.Module):
         self.act_fn = nn.SiLU()
 
     def forward(self, hidden_state):
-        return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
+        gate_proj = self.gate_proj(hidden_state)
+        gate_proj = self.act_fn(gate_proj)
+        up_proj = self.up_proj(hidden_state)
+        proj = gate_proj * up_proj
+        return self.down_proj(proj)
 
 class BasicLinear(nn.Module):
     def __init__(self, input_size, output_size, act=False):
@@ -422,10 +426,12 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
+        all_hidden_states = outputs[2]
         logits = self.lm_head(hidden_states)
         hidden_dim = hidden_states.shape[-1]
         logits_dim = logits.shape[-1]
 
+        jacobi_all_hidden_states = []
         # Iterate through the batch dimension
         jacobi_hidden_states, jacobi_logits = [], []
         # max_sequence = 0
@@ -436,6 +442,13 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             #     max_sequence = curr_sequence
             jacobi_hidden_states.append(hidden_states[i, replace_indices, :])
             jacobi_logits.append(logits[i, replace_indices, :])
+            
+            temp = []
+            for mid_hidden_state in all_hidden_states:
+                temp.append(mid_hidden_state[i, replace_indices, :])
+            jacobi_all_hidden_states.append(torch.stack(temp, dim=0))  # (layers, seq, hidden)
+        jacobi_all_hidden_states = torch.cat(jacobi_all_hidden_states, dim=1)  # (layers, seqs, hidden) ~= 24, 194, 896
+
         
         # for i in range(jacobi_hidden_states):
         #     curr_sequence = jacobi_hidden_states[i].shape[0]
@@ -463,5 +476,6 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             past_key_values=outputs.past_key_values,
             # hidden_states=lm_hidden_states,
             jacobi_hidden_states=jacobi_hidden_states,
+            jacobi_all_hidden_states=jacobi_all_hidden_states,
             attentions=outputs.attentions,
         )
