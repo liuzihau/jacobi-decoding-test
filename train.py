@@ -267,6 +267,7 @@ if train_config["statepath"] is not None:
 
 continuous_loss_nan = 0
 epoch_counts = []
+previous_data = []
 for epoch in range(num_epochs + 1):
     top_3acc = [[0 for _ in range(jacobi_token_nums)] for _ in range(3)]
     correct = [0 for _ in range(jacobi_token_nums)]
@@ -360,6 +361,7 @@ for epoch in range(num_epochs + 1):
             if torch.isnan(vloss).any() or torch.isnan(ploss).any() or torch.isinf(vloss).any() or torch.isinf(ploss).any():
                 continuous_loss_nan += 1
                 print(f"loss contain nan : {data['filename']}")
+                print(f"previous data : {previous_data}")
                 report = output_abnormal_message(target_p, output_logp, output['jacobi_hidden_states'], data["hidden_state_target"], pshape0, pshape1, vshape0, vshape1)
                 print(report)
                 del ploss, vloss, target_head
@@ -372,6 +374,7 @@ for epoch in range(num_epochs + 1):
             if continuous_loss_nan >= 3:
                 break
             continuous_loss_nan = max(0, continuous_loss_nan-1)
+            previous_data = data['filename']
 
             loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
             # loss.backward()
@@ -414,6 +417,7 @@ for epoch in range(num_epochs + 1):
             print(torch.cuda.memory_summary(device='cuda', abbreviated=True), flush=True)
     
     if continuous_loss_nan >= 3:
+        accelerator.save_state(output_dir=f"{train_config['cpdir']}/{train_config['name']}/state_{epoch}_abnormal")
         break
     epoch_counts.append(counts)
     epoch_loss /= num_batches
