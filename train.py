@@ -19,7 +19,7 @@ from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 from utils import output_abnormal_message, top_accuracy
 
     
-def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, jacobi_weight, criterion, jacobi_token_nums, discount=1):
+def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, all_layers_outputs, jacobi_weight, criterion, jacobi_token_nums, discount=1):
     target_logits = torch.clamp(target_logits, min=-1e2, max=1e2)
     jacobi_logits = torch.clamp(jacobi_logits, min=-1e2, max=1e2)
     jacobi_hidden_states = torch.clamp(jacobi_hidden_states, min=-1e3, max=1e3)
@@ -39,9 +39,10 @@ def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacob
     vloss = torch.sum(vloss_full) / (vloss_full.shape[0] * vloss_full.shape[1] + 1e-5)
 
     # Regularization term for Jacobi weight
-    reg_term_jacobi = torch.sum(torch.abs(jacobi_weight)) / (jacobi_weight.shape[-1] + 1e-5)   # L1 regularization
-    reg_term_hidden = torch.sum(jacobi_hidden_states ** 2) * (1/2) / (jacobi_hidden_states.shape[0] * jacobi_hidden_states.shape[1] + 1e-5)
-    # reg_term = reg_lambda * torch.sum(jacobi_weight ** 2)  # L2 regularization
+    reg_term_jacobi = torch.sum(torch.abs(jacobi_weight.float())) / (jacobi_weight.shape[-1] + 1e-5)   # L1 regularization
+    reg_term_hidden = 0
+    for tensor in all_layers_outputs:
+        reg_term_hidden += torch.sum(tensor.float() ** 2) * (1/2) / (tensor.shape[0] * tensor.shape[1] + 1e-5)
 
     return vloss, ploss, reg_term_jacobi, reg_term_hidden
 
@@ -60,7 +61,7 @@ with open(f"{train_config['basepath']}/config.json", 'r') as f:
 set_seed(0)
 torch.backends.cuda.matmul.allow_tf32 = True
 
-accelerator = Accelerator(mixed_precision='bf16', gradient_accumulation_steps=train_config["gradient_accumulation_steps"])
+accelerator = Accelerator(mixed_precision=train_config['mixed_precision'], gradient_accumulation_steps=train_config["gradient_accumulation_steps"])
 
 if accelerator.is_main_process:
     wandb.login(key=train_config["api_key"])
@@ -267,7 +268,7 @@ for epoch in range(num_epochs + 1):
                 print(report)
 
             
-            vloss, ploss, reg_term_jacobi, reg_term_hidden = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], model.jacobi_weight, criterion, jacobi_token_nums)
+            vloss, ploss, reg_term_jacobi, reg_term_hidden = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], output['jacobi_all_hidden_states'], model.jacobi_weight, criterion, jacobi_token_nums)
             
             # if torch.isnan(vloss).any() or torch.isnan(ploss).any() or torch.isinf(vloss).any() or torch.isinf(ploss).any():
             #     continuous_loss_nan += 1
@@ -353,7 +354,7 @@ for epoch in range(num_epochs + 1):
                 target_head = target_head.detach()
 
                 
-                vloss, ploss, reg_term_jacobi, reg_term_hidden = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], model.jacobi_weight, criterion, jacobi_token_nums)
+                vloss, ploss, reg_term_jacobi, reg_term_hidden = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], output['jacobi_all_hidden_states'], model.jacobi_weight, criterion, jacobi_token_nums)
                 loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss + train_config["r_w"] * reg_term_jacobi + train_config["h_w"] * reg_term_hidden
             
                 _, predicted = torch.max(output['jacobi_logits'], -1)
