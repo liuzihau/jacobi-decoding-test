@@ -12,67 +12,14 @@ from torch import nn, optim
 from transformers import AutoConfig, get_linear_schedule_with_warmup
 from accelerate import Accelerator
 from accelerate.utils import set_seed
-from safetensors import safe_open
 
 from data_processing import CustomDataset, DataCollatorWithPadding, list_files
 from models.qwen2.modeling_qwen2_jacobi import Qwen2JacobiForCausalLM
 from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+from utils import output_abnormal_message, top_accuracy
 
-def output_abnormal_message(target_p, output_logp, jacobi_hidden_states, target_hidden_state, pshape0, pshape1, vshape0, vshape1):
-    report = ""
-    report += f"[target_p contain inf]: {torch.isinf(target_p).any()}\n"
-    report += f"[target_hidden contain inf]: {torch.isinf(target_hidden_state).any()}\n"                
-    report += f"[output_logp contain inf]: {torch.isinf(output_logp).any()}\n"
-    report += f"[output_hidden contain inf]: {torch.isinf(jacobi_hidden_states).any()}\n"
-    report += f"[target_p contain nan]: {torch.isnan(target_p).any()}\n"
-    report += f"[target_hidden contain nan]: {torch.isnan(target_hidden_state).any()}\n"                
-    report += f"[output_logp contain nan]: {torch.isnan(output_logp).any()}\n"
-    report += f"[output_hidden contain nan]: {torch.isnan(jacobi_hidden_states).any()}\n"
-    report += f"[pshape]: {pshape0}, {pshape1}\n"
-    report += f"[vshape]: {vshape0}, {vshape1}"
-    return report
-
-def load_jacobi_weight(model, cpdir):
-    with safe_open(cpdir, framework="pt") as f:
-        keys = f.keys()        
-        for name, param in model.named_parameters():
-            all_set = True
-            if "model." in name:
-                continue
-            if name in keys:
-                tensor_slice = f.get_slice(name)
-                tensor = tensor_slice[:].clone().detach()
-                if tensor.shape == param.shape:
-                    param.data.copy_(tensor) 
-                else:
-                    print(f"Shape mismatch for {name}: Model shape {param.shape}, File shape {tensor.shape}")
-            else:
-                all_set = False
-                print(f"Key {name} not found in SafeTensor file.")
-        if all_set:
-            print("All parameters has been loaded.")
-
-
-def top_accuracy(output, target, jacobi_token_nums, topk=(1,)):
-    # output.shape (bs, num_classes), target.shape (bs, )
-    """Computes the accuracy over the k top predictions for the specified values of k"""
-    output = output.view(-1, jacobi_token_nums, output.shape[-1])
-    target = target.view(-1, jacobi_token_nums)
-    with torch.no_grad():
-        maxk = max(topk)
-        group_size = target.size(0)
-        jacobi_seq_size = target.size(1)
-        _, pred = output.topk(maxk, -1, True, True)  # bs, seq, topk ex [4, 10, 3]
-        # pred = pred.t()
-        correct = pred.eq(target.view(group_size, jacobi_seq_size, -1).expand_as(pred))
-
-        res = []
-        for k in topk:
-            correct_k = correct[:, :, :k].float().sum(0).sum(-1)
-            res.append(correct_k)
-        return res
     
-def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, criterion, jacobi_token_nums, discount=1):
+def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, jacobi_weight, criterion, jacobi_token_nums, discount=1):
     target_logits = torch.clamp(target_logits, min=-1e2, max=1e2)
     jacobi_logits = torch.clamp(jacobi_logits, min=-1e2, max=1e2)
     jacobi_hidden_states = torch.clamp(jacobi_hidden_states, min=-1e3, max=1e3)
@@ -91,71 +38,12 @@ def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacob
     vloss_full = torch.mean(vloss_full, dim=-1)  
     vloss = torch.sum(vloss_full) / (vloss_full.shape[0] * vloss_full.shape[1] + 1e-5)
 
-    return vloss, ploss, target_p, out_logp, plogp.shape[0], plogp.shape[1], vloss_full.shape[0], vloss_full.shape[1]
+    # Regularization term for Jacobi weight
+    reg_term = torch.sum(torch.abs(jacobi_weight)) / (jacobi_weight.shape[-1] + 1e-5)   # L1 regularization
+    # reg_term = reg_lambda * torch.sum(jacobi_weight ** 2)  # L2 regularization
 
-def cllm_loss():
-    ### compute AutoRegression loss ###
-    # use labels to avoid pattern collapse
-    if self.use_gt_labels:
-        labels = inputs['labels_ids']
-    else:
-        labels = inputs['teacher_output_ids']
-    # TODO: check if it's right when batch size > 1
-    labels = torch.tensor(labels).to(model.device)
-    attention_mask = torch.full_like(labels, 1).to(model.device)
-    label_student_model_output = model(labels, attention_mask)
+    return vloss, ploss, reg_term
 
-    attention_mask = torch.full_like(jacobian_trajectory[0], 1).to(model.device)
-    attention_mask = jacobian_trajectory[-1] != self.tokenizer.pad_token_id
-    logits_last =  self.get_logits(model, jacobian_trajectory[-1].clone().detach(), attention_mask)
-
-    label_smoother = LabelSmoother(epsilon=0.1, ignore_index= -100)
-    loss_ar = label_smoother(label_student_model_output, labels, shift_labels=True)
-    loss_ar*=10
-    if self.args.qlora:
-        loss_ar.requires_grad = True
-    print(f'loss ar: {loss_ar} computed! performing backward pass...')
-    with self.accelerator.accumulate(model):
-        self.accelerator.backward(loss_ar)
-
-    ### compute Consistency loss (global) ###
-    # random select one point from trajectory
-    i = random.choice(range(len(jacobian_trajectory))[:-1])
-
-    attention_mask = torch.full_like(jacobian_trajectory[0], 1).to(jacobian_trajectory[0].device)
-    attention_mask = jacobian_trajectory[i] != self.tokenizer.pad_token_id
-    logits_i = self.get_logits(model, jacobian_trajectory[i].clone().detach(), attention_mask)
-
-    output_mask = jacobian_trajectory[i][..., 1:] == self.tokenizer.pad_token_id
-    # We do not calculate the cross entrophy of same logits to alleviate misleading gradients
-    for j in range(bsz):
-        end_of_mask_position = torch.where(jacobian_trajectory[i][j, 1:] != jacobian_trajectory[-1][j, 1:])[0]
-        if len(end_of_mask_position)==0:
-            output_mask[j, :] = True
-        else:
-            output_mask[j, :end_of_mask_position[0]] = True
-    
-    loss_global = self.soft_cross_entropy(
-                logits_i[..., :-1, :].float(), # logits generated by the last token is dropped
-                logits_last[..., :-1, :].to(logits_i.device).clone().detach().float(),
-                output_mask.to(logits_i.device)
-    )
-    if self.args.qlora:
-        loss_global.requires_grad = True
-    print(f'loss global {loss_global} computed! performing backward pass...')
-    with self.accelerator.accumulate(model):
-        self.accelerator.backward(loss_global)
-    
-    if self.args.local_rank == 0:
-        wandb.log({"ar loss": loss_ar})
-        wandb.log({"consistency loss": loss_global})
-
-    # sync processes
-    torch.distributed.barrier()
-    # total loss = ar_loss + consistency_global_loss
-    loss = loss_ar.detach() + loss_global.detach()
-
-    return loss
 
 CONFIG_PATH = '/content/jacobi-decoding-test/configs/train_config.json'
 PROJECT = 'Jacobi-test'
@@ -169,7 +57,6 @@ with open(f"{train_config['basepath']}/config.json", 'r') as f:
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 set_seed(0)
-
 torch.backends.cuda.matmul.allow_tf32 = True
 
 accelerator = Accelerator(mixed_precision='bf16', gradient_accumulation_steps=train_config["gradient_accumulation_steps"])
@@ -285,6 +172,25 @@ for epoch in range(num_epochs + 1):
                             use_cache=False,
                             output_hidden_states=True,
                             return_dict=True)
+            
+            if torch.isnan(output['jacobi_hidden_states']).any():
+                continuous_loss_nan += 1
+                print(f"outputs contain nan : {data['filename']}")
+                print(f"previous data : {previous_data}")
+                for name, param in model.named_parameters():
+                    if "model." in name:
+                        continue
+                    print(f"[{name}] contain nan: {torch.isnan(param).any()}")
+                    print(param.numel(), torch.abs(param).max(), torch.abs(param).min(), torch.abs(param).sum())
+                gc.collect()
+                torch.cuda.empty_cache()
+                optimizer.zero_grad()
+                if continuous_loss_nan >= 3:
+                    break
+                continue
+            continuous_loss_nan = max(0, continuous_loss_nan-1)
+            previous_data = data['filename']
+
             with torch.no_grad():
                 target_head = model.lm_head(data["hidden_state_target"])  # [sum(jacobi_token * sets), logits]
                 target_head = target_head.detach()
@@ -354,29 +260,24 @@ for epoch in range(num_epochs + 1):
                     report = report[:-2] + "\n"
                 print(report)
 
-            (
-                vloss, ploss, target_p, output_logp, pshape0, pshape1, vshape0, vshape1
-                ) = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
             
-            if torch.isnan(vloss).any() or torch.isnan(ploss).any() or torch.isinf(vloss).any() or torch.isinf(ploss).any():
-                continuous_loss_nan += 1
-                print(f"loss contain nan : {data['filename']}")
-                print(f"previous data : {previous_data}")
-                report = output_abnormal_message(target_p, output_logp, output['jacobi_hidden_states'], data["hidden_state_target"], pshape0, pshape1, vshape0, vshape1)
-                print(report)
-                del ploss, vloss, target_head
-                gc.collect()
-                torch.cuda.empty_cache()
-                optimizer.zero_grad()
-                if continuous_loss_nan >= 3:
-                    break
-                continue
-            if continuous_loss_nan >= 3:
-                break
-            continuous_loss_nan = max(0, continuous_loss_nan-1)
-            previous_data = data['filename']
+            vloss, ploss, reg_term = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], model.jacobi_weight, criterion, jacobi_token_nums)
+            
+            # if torch.isnan(vloss).any() or torch.isnan(ploss).any() or torch.isinf(vloss).any() or torch.isinf(ploss).any():
+            #     continuous_loss_nan += 1
+            #     print(f"loss contain nan : {data['filename']}")
+            #     print(f"previous data : {previous_data}")
+            #     report = output_abnormal_message(target_p, output_logp, output['jacobi_hidden_states'], data["hidden_state_target"], pshape0, pshape1, vshape0, vshape1)
+            #     print(report)
+            #     del ploss, vloss, target_head
+            #     gc.collect()
+            #     torch.cuda.empty_cache()
+            #     optimizer.zero_grad()
+            #     if continuous_loss_nan >= 3:
+            #         break
+            #     continue
 
-            loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
+            loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss + train_config["r_w"] * reg_term
             # loss.backward()
             accelerator.backward(loss)
             accelerator.clip_grad_value_(model.parameters(), train_config["grad_clip"])
@@ -400,7 +301,7 @@ for epoch in range(num_epochs + 1):
 
         if accelerator.is_main_process and ct != 0:
             logdict = {"train/lr": optimizer.optimizer.param_groups[0]["lr"], "train/vloss": vloss.item(),
-                       "train/ploss": ploss.item(), "train/loss": loss.item(), "train/acc": cc / ct}
+                       "train/ploss": ploss.item(), "train/rloss": reg_term.item(), "train/loss": loss.item(), "train/acc": cc / ct}
             for id, i in enumerate(top_3acc):
                 for seq in range(len(i)):
                     logdict[f'train/top_{id + 1}_token_{seq}_acc'] = top_3acc[id][seq].item() / total
@@ -446,10 +347,8 @@ for epoch in range(num_epochs + 1):
                 target_head = target_head.detach()
 
                 
-                (
-                    vloss, ploss, target_p, output_logp, pshape0, pshape1, vshape0, vshape1
-                    ) = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], criterion, jacobi_token_nums)#, loss_mask)
-                loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
+                vloss, ploss, reg_term = compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], model.jacobi_weight, criterion, jacobi_token_nums)
+                loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss + train_config["r_w"] * reg_term
             
                 _, predicted = torch.max(output['jacobi_logits'], -1)
                 _, target = torch.max(target_head, -1)
@@ -465,7 +364,7 @@ for epoch in range(num_epochs + 1):
                 total += ct
 
             if accelerator.is_main_process and ct != 0:
-                logdict = {"test/vloss": vloss.item(), "test/ploss": ploss.item(), "test/loss": loss.item(), "test/acc": cc / ct}
+                logdict = {"test/vloss": vloss.item(), "test/ploss": ploss.item(), "test/rloss": reg_term.item(), "test/loss": loss.item(), "test/acc": cc / ct}
             for id, i in enumerate(top_3acc):
                 for seq in range(len(i)):
                     logdict[f'test/top_{id + 1}_token_{seq}_acc'] = top_3acc[id][seq].item() / total
