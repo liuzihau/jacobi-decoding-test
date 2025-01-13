@@ -25,9 +25,12 @@ class JacobiCausalLMOutputWithPast(ModelOutput):
 
 
 class Qwen2MLP(nn.Module):
-    def __init__(self, input_size, output_size, intermediate_ratio=None):
+    def __init__(self, input_size, output_size, intermediate_ratio=None, clamp=False):
         super().__init__()
         self.input_size = input_size
+        self.clamp = clamp
+        if self.clamp:
+            print("adapter uses clamp")
         self.intermediate_size = int(input_size * intermediate_ratio) if intermediate_ratio is not None else input_size * 2
         self.hidden_size = output_size
         self.gate_proj = nn.Linear(self.input_size, self.intermediate_size, bias=False)
@@ -37,9 +40,13 @@ class Qwen2MLP(nn.Module):
 
     def forward(self, hidden_state):
         gate_proj = self.gate_proj(hidden_state)
+        if self.clamp:
+            gate_proj = torch.clamp(gate_proj, min=-1e2, max=1e2)
         gate_proj = self.act_fn(gate_proj)
         up_proj = self.up_proj(hidden_state)
         proj = gate_proj * up_proj
+        if self.clamp:
+            proj = torch.clamp(proj, min=-1e3, max=1e3)
         return self.down_proj(proj)
 
 class BasicLinear(nn.Module):
