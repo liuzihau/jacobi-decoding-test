@@ -65,9 +65,9 @@ class BasicLinear(nn.Module):
         return x
 
 class ProjectionQwen2MLP(nn.Module):
-    def __init__(self, input_size, output_size, intermediate_ratio=None, layers=1):
+    def __init__(self, input_size, output_size, intermediate_ratio=None, clamp=False, layers=1):
         super().__init__()
-        self.module_list = nn.ModuleList([Qwen2MLP(input_size, output_size, intermediate_ratio) for _ in range(layers)])
+        self.module_list = nn.ModuleList([Qwen2MLP(input_size, output_size, intermediate_ratio, clamp) for _ in range(layers)])
     
     def forward(self, hidden_state, idx):
         return self.module_list[idx](hidden_state) 
