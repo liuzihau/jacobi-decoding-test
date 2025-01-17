@@ -6,9 +6,16 @@ from torch import nn
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
 from transformers.generation import GenerationMixin
+from transformers.generation.logits_process import (
+    LogitsProcessorList,
+    RepetitionPenaltyLogitsProcessor,
+    TemperatureLogitsWarper,
+    TopKLogitsWarper,
+    TopPLogitsWarper,
+)
 from transformers.utils import ModelOutput
 
-from models.qwen2.modeling_qwen2 import Qwen2PreTrainedModel, Qwen2Model
+from models.qwen2.modeling_qwen2 import Qwen2PreTrainedModel, Qwen2Model, Qwen2RMSNorm
 
 
 @dataclass
@@ -84,7 +91,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     
-    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4, adapter_type='Linear', shared_adapter=True, shared_jacobi_token=True, jacobi_adapter_kwargs=None):
+    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4, adapter_type='Linear', shared_adapter=True, shared_jacobi_token=True, jacobi_adapter_kwargs=None, layer_norm=False, decoding_mode="jacobi"):
         super().__init__(config)
         self.confg = config
         self.model = Qwen2Model(config)
@@ -94,12 +101,13 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.jacobi_token_nums = jacobi_token_nums
         self.shared_adapter = shared_adapter
         self.shared_jacobi_token = shared_jacobi_token
-        
+        self.layer_norm = layer_norm
+        self.decoding_mode = decoding_mode
+
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         
         attn_hidden_size = config.hidden_size
         attn_layers = config.num_hidden_layers
-
         if adapter_type == "Linear":
             adapter_module = ProjectionLinear
         elif adapter_type == 'Qwen2MLP':
@@ -113,10 +121,10 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             adapter_layers = attn_layers // self.proj_freq
         jacobi_adapter_kwargs = {} if jacobi_adapter_kwargs is None else jacobi_adapter_kwargs        
         self.adapters = nn.ModuleList([adapter_module((n+2)*attn_hidden_size, attn_hidden_size, layers=adapter_layers, **jacobi_adapter_kwargs) for n in range(mix_sequences)])
-        
-        temp_weight = torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5
-        temp_weight = temp_weight.to(dtype=torch.bfloat16)  # can be remove?
+        self.pre_adapter_layernorm = Qwen2RMSNorm(attn_hidden_size*2)
 
+        temp_weight = torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5
+        temp_weight = temp_weight.to(dtype=torch.bfloat16)  # can be removed?
         if self.shared_jacobi_token:
             self.jacobi_weight = nn.Parameter(temp_weight)
         else:
@@ -137,6 +145,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             nn.init.zeros_(param)  # Biases initialized to zero
         elif 'jacobi_weight' in name:
             nn.init.normal_(param, mean=0.0, std=std)  # Adjust bounds as necessary
+        elif 'layernorm' in name:
+            nn.init.ones_(param)  # layernorm initialized to all one in QwenRMSNorm
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -223,7 +233,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             for i in range(self.mix_sequences):
                 prev_states = target_states[:, -(self.jacobi_token_nums+i+1):-(i+1), :]
                 curr_states = torch.cat([curr_states, prev_states], dim=-1)
-                
+                if self.layer_norm:
+                    curr_states = self.pre_adapter_layernorm(curr_states)
                 if new_states is None:
                     new_states = self.adapters[i](curr_states, adapter_idx)
                 else:
@@ -418,72 +429,325 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         output_hidden_states = (output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.forward_backbone_model(
+        if self.decoding_mode == "jacobi":
+            outputs = self.forward_backbone_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                loss_mask=loss_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                cache_position=cache_position,
+                )
+            hidden_states = outputs[0]
+            all_hidden_states = outputs["hidden_states"]
+            logits = self.lm_head(hidden_states)
+        
+            # Iterate through the batch dimension
+            jacobi_hidden_states, jacobi_all_hidden_states, jacobi_logits = [], [], []
+
+            # max_sequence = 0
+            for i in range(hidden_states.shape[0]):
+                replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
+                jacobi_hidden_states.append(hidden_states[i, replace_indices, :])
+                jacobi_logits.append(logits[i, replace_indices, :])
+                
+                temp = []
+                for mid_hidden_state in all_hidden_states:
+                    temp.append(mid_hidden_state[i, replace_indices, :])
+                jacobi_all_hidden_states.append(torch.stack(temp, dim=0))  # (layers, seq, hidden)
+
+            jacobi_hidden_states = torch.cat(jacobi_hidden_states, dim=0)
+            jacobi_all_hidden_states = torch.cat(jacobi_all_hidden_states, dim=1)  # (layers, seqs, hidden) ~= 24, 194, 896
+            jacobi_logits = torch.cat(jacobi_logits, dim=0)
+
+            if not return_dict:
+                output = (logits,) + outputs[1:]
+                return output
+
+            return JacobiCausalLMOutputWithPast(
+                jacobi_logits=jacobi_logits,
+                past_key_values=outputs.past_key_values,
+                jacobi_hidden_states=jacobi_hidden_states,
+                jacobi_all_hidden_states=jacobi_all_hidden_states,
+                attentions=outputs.attentions,
+            )
+
+        elif self.decoding_mode == "naive":
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                cache_position=cache_position,
+                )
+            hidden_states = outputs[0]
+            # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+
+            loss = None
+            if labels is not None:
+                loss = self.loss_function(logits, labels, self.vocab_size, **loss_kwargs)
+
+            if not return_dict:
+                output = (logits,) + outputs[1:]
+                return (loss,) + output if loss is not None else output
+
+            return CausalLMOutputWithPast(
+                loss=loss,
+                logits=logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
+        
+    @torch.no_grad()
+    def jagenerate(
+            self,
+            input_ids,
+            temperature=0.0,
+            top_p=0.0,
+            top_k=0.0,
+            max_new_tokens=512,
+            max_length=2048,
+            log=False,
+            is_llama3=False,
+
+    ):
+        if is_llama3:
+            stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        
+        max_length = max_length - self.jacobi_token_nums
+
+        if temperature > 1e-5:
+            logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
+        else:
+            logits_processor = None
+
+        #assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
+        # Avoid modifying the input_ids in-place
+
+        padding=(torch.zeros(1,1,dtype=torch.long)-1).to(input_ids.device)
+        input_ids = input_ids.clone()
+
+        # try using hugging face's kv logic
+        # self.ea_layer.reset_kv()
+        past_key_values = DynamicCache()
+
+
+        # # Initialize the past key and value states
+        # if hasattr(self, "past_key_values"):
+        #     past_key_values = self.past_key_values
+        #     past_key_values_data = self.past_key_values_data
+        #     current_length_data = self.current_length_data
+        #     # Reset the past key and value states
+        #     current_length_data.zero_()
+        # else:
+        #     (
+        #         past_key_values,
+        #         past_key_values_data,
+        #         current_length_data,
+        #     ) = initialize_past_key_values(self.base_model)
+        #     self.past_key_values = past_key_values
+        #     self.past_key_values_data = past_key_values_data
+        #     self.current_length_data = current_length_data
+
+        
+        # do the first inference
+        input_len = input_ids.shape[1]
+        input_ids = torch.cat([input_ids]+[padding]*self.jacobi_token_nums, dim=-1)
+
+        jacobi_indices = torch.nonzero(input_ids == -1, as_tuple=True)
+        loss_mask = torch.zeros_like(input_ids, device=input_ids.device)
+        loss_mask[jacobi_indices] = 1
+        input_ids[jacobi_indices] = 0
+        output = self.forward(
             input_ids=input_ids,
-            attention_mask=attention_mask,
             loss_mask=loss_mask,
-            position_ids=position_ids,
             past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            cache_position=cache_position,
-        )
-
-        hidden_states = outputs[0]
-        all_hidden_states = outputs["hidden_states"]
-        logits = self.lm_head(hidden_states)
-        hidden_dim = hidden_states.shape[-1]
-        logits_dim = logits.shape[-1]
-
-        jacobi_all_hidden_states = []
-        # Iterate through the batch dimension
-        jacobi_hidden_states, jacobi_logits = [], []
-        # max_sequence = 0
-        for i in range(hidden_states.shape[0]):
-            replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
-            # curr_sequence = replace_indices.shape[0]
-            # if curr_sequence> max_sequence:
-            #     max_sequence = curr_sequence
-            jacobi_hidden_states.append(hidden_states[i, replace_indices, :])
-            jacobi_logits.append(logits[i, replace_indices, :])
-            
-            temp = []
-            for mid_hidden_state in all_hidden_states:
-                temp.append(mid_hidden_state[i, replace_indices, :])
-            jacobi_all_hidden_states.append(torch.stack(temp, dim=0))  # (layers, seq, hidden)
-        jacobi_all_hidden_states = torch.cat(jacobi_all_hidden_states, dim=1)  # (layers, seqs, hidden) ~= 24, 194, 896
-
+            use_cache=True,
+            output_hidden_states=True,
+            return_dict=True
+            )
         
-        # for i in range(jacobi_hidden_states):
-        #     curr_sequence = jacobi_hidden_states[i].shape[0]
-        #     if curr_sequence < max_sequence:
-        #         seq_pad_hidden = torch.zeros((1, (max_sequence - curr_sequence), hidden_dim)) 
-        #         seq_pad_target = torch.zeros((1, (max_sequence - curr_sequence), logits_dim))
-        #         jacobi_hidden_states[i] = torch.cat([jacobi_hidden_states[i], seq_pad_hidden], dim=0)
-        #         jacobi_logits[i] = torch.cat([jacobi_logits[i], seq_pad_target], dim=0)
-        jacobi_hidden_states = torch.cat(jacobi_hidden_states, dim=0)
-        jacobi_logits = torch.cat(jacobi_logits, dim=0)
-        
-        # loss = None
-        # if labels is not None:
-        #     loss = self.loss_function(jacobi_logits, labels, self.vocab_size, **loss_kwargs)
+        print(output)
 
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            # return (loss,) + output if loss is not None else output
-            return output
-
-        return JacobiCausalLMOutputWithPast(
-            # loss=loss,
-            # logits=lm_logits,
-            jacobi_logits=jacobi_logits,
-            past_key_values=outputs.past_key_values,
-            # hidden_states=lm_hidden_states,
-            jacobi_hidden_states=jacobi_hidden_states,
-            jacobi_all_hidden_states=jacobi_all_hidden_states,
-            attentions=outputs.attentions,
+        reset_tree_mode(self)
+        draft_tokens, retrieve_indices,tree_mask,tree_position_ids, logits, hidden_state, sample_token = initialize_tree(
+            input_ids, self, past_key_values, logits_processor
         )
+        new_token = 0
+
+        for idx in range(max_length):
+            #with Timer("all"):
+            self.base_model.model.tree_mask = tree_mask
+
+            draft_tokens=draft_tokens.to(input_ids.device)
+            #with Timer("tree_decoding"):
+            logits, hidden_state_new, outputs = tree_decoding(
+                self,
+                draft_tokens,
+                past_key_values,
+                tree_position_ids,
+                input_ids,
+                retrieve_indices,
+            )
+            #retrieve_indices=tree_buffers["retrieve_indices"]
+            #logits = logits[0, retrieve_indices]
+            draft_tokens=torch.cat((draft_tokens,padding),dim=1)
+            candidates=draft_tokens[0,retrieve_indices]
+            best_candidate, accept_length, sample_p = evaluate_posterior(
+                logits, candidates, logits_processor
+            )
+            # print(accept_length)
+            #with Timer("update_inference_inputs"):
+            input_ids, draft_tokens, retrieve_indices,tree_mask,tree_position_ids, new_token, hidden_state, sample_token = update_inference_inputs(
+                input_ids,
+                candidates,
+                best_candidate,
+                accept_length,
+                retrieve_indices,
+                logits_processor,
+                new_token,
+                past_key_values_data,
+                current_length_data,
+                self,
+                hidden_state_new,
+                sample_p
+            )
+
+            if is_llama3:
+                if stop_token_id in input_ids[0, input_len:].tolist():
+                    break
+
+            if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                break
+            if new_token > max_new_tokens:
+                break
+            if input_ids.shape[1] > max_length:
+                break
+        if not log:
+            return input_ids
+        else:
+            return input_ids, new_token, idx
+
+def prepare_logits_processor(
+        temperature: float = 0.0,
+        repetition_penalty: float = 0.0,
+        top_p: float = 0.0,
+        top_k: int = 0
+) -> LogitsProcessorList:
+    processor_list = LogitsProcessorList()
+    if temperature > 1e-5:
+        if temperature >= 1e-5 and temperature != 1.0:
+            processor_list.append(TemperatureLogitsWarper(temperature))
+        if repetition_penalty > 1.0:
+            processor_list.append(RepetitionPenaltyLogitsProcessor(repetition_penalty))
+        if 1e-8 <= top_p < 1.0:
+            processor_list.append(TopPLogitsWarper(top_p))
+        if top_k > 0:
+            processor_list.append(TopKLogitsWarper(top_k))
+    return processor_list
+
+
+def initialize_past_key_values(model):
+    """
+    Initialize past key and value states for a given transformer model.
+
+    This function prepares key-value cache structures for the model, allowing it to store and reuse
+    past key and value states during autoregressive decoding, which can improve efficiency.
+
+    Args:
+        model (nn.Module): The transformer model for which past key-value states need to be initialized.
+
+    Returns:
+        tuple:
+            - past_key_values (list): A list of KVCache objects for each layer in the model.
+            - past_key_values_data (torch.Tensor): The tensor that will store all keys and values.
+            - current_length_data (torch.Tensor): A tensor tracking the current length of keys/values in the cache.
+    """
+    # Extracting configuration from the model
+    config = model.config
+    # Initializing the batch size to 1, this can be modified if different batch sizes are required
+    batch_size = 1
+    # Initializing a tensor to store past keys and values for all layers
+
+    devices=[]
+    for i in range(config.num_hidden_layers):
+        try:
+            device = model.model.layers[i].self_attn.q_proj.weight.device
+        except:
+            device=model.layers[i].self_attn.q_proj.weight.device
+        devices.append(device)
+    past_key_values_data_list=[]
+    startnum=0
+    startdevice=devices[0]
+    for id,i in enumerate(devices):
+        if startdevice!=i:
+            past_key_values_data = torch.zeros(
+                startnum * 2,
+                batch_size,
+                config.num_key_value_heads,
+                config.max_position_embeddings,
+                config.hidden_size // config.num_attention_heads,
+                device=startdevice,
+                dtype=model.dtype,
+            )
+            past_key_values_data_list.append(past_key_values_data)
+            startdevice = i
+            startnum=0
+        startnum += 1
+    past_key_values_data = torch.zeros(
+        startnum * 2,
+        batch_size,
+        config.num_key_value_heads,
+        config.max_position_embeddings,
+        config.hidden_size // config.num_attention_heads,
+        device=startdevice,
+        dtype=model.dtype,
+    )
+    past_key_values_data_list.append(past_key_values_data)
+    # Initialize tensor to store the current length of the cached data for all layers.
+    # [IMPORTANT] It needs to be kept on CPU for quick access and updates.
+    current_length_data = torch.zeros(
+        config.num_hidden_layers * 2, dtype=torch.long, device="cpu"
+    )
+    # Creating a KVCache for each pair of key and value in all layers
+    past_key_values = [] * config.num_hidden_layers
+
+    bias=0
+    start_data_m=devices[0].index
+    for i in range(config.num_hidden_layers):
+        data_m=devices[i].index
+        if data_m!=start_data_m:
+            bias=0
+            start_data_m=data_m
+        try:
+            past_key_values.append(
+                [
+                    KVCache(past_key_values_data_list[data_m-devices[0].index][2*bias + j], current_length_data[i * 2 + j])
+                    for j in range(2)
+                ]
+            )
+        except:
+            past_key_values.append(
+                [
+                    KVCache(past_key_values_data_list[0][2 * bias + j],
+                            current_length_data[i * 2 + j])
+                    for j in range(2)
+                ]
+            )
+        bias+=1
+    return past_key_values, past_key_values_data_list, current_length_data
+
+
+

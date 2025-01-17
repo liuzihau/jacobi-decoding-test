@@ -17,7 +17,7 @@
     "initialise_method": "kaiming",
     "jacobi_adapter_kwargs":{
         "intermediate_ratio": null,
-        "clamp":true
+        "clamp":false
     },
     "shared_adapter": false,
     "shared_jacobi_token": true,

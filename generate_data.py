@@ -28,7 +28,15 @@ def build_dataset_rank(tokenizer, ge_config, split="train", select=None):
                 "content": "You are a helpful assistant."},
             ]
             convroles=["user","assistant"]
-            roles = {"human": "user", "user": "user", "gpt": "assistant", "chatgpt": "assistant", "bard": "assistant","bing": "assistant", "system": "system"}
+            roles = {
+                "human": "user", 
+                "user": "user", 
+                "gpt": "assistant", 
+                "chatgpt": "assistant", 
+                "bard": "assistant",
+                "bing": "assistant", 
+                "system": "system"
+                }
             source= examples['conversations'][i]
             if len(source) == 0:
                 continue
@@ -53,16 +61,16 @@ def build_dataset_rank(tokenizer, ge_config, split="train", select=None):
                     continue
                 elif turn["role"] == "user":
                     conversation= tokenizer.apply_chat_template(
-                    messages[:i+1],
-                    tokenize=False,
-                    add_generation_prompt=False,
-                    )
+                        messages[:i+1],
+                        tokenize=False,
+                        add_generation_prompt=False
+                        )
                     input_ids = tokenizer(
-                    conversation,
-                    return_tensors="pt",
-                    max_length=2048,
-                    add_special_tokens=False,
-                    ).input_ids[0]
+                        conversation,
+                        return_tensors="pt",
+                        max_length=2048,
+                        add_special_tokens=False
+                        ).input_ids[0]
                     if input_ids.shape[0] + ge_config["jacobi_tokens"] > ge_config["max_len"]:
                         break
                     new_examples["conversation"].append(conversation)

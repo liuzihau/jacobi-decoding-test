@@ -15,146 +15,86 @@ from accelerate.utils import set_seed
 
 from data_processing import CustomDataset, DataCollatorWithPadding, list_files
 from models.qwen2.modeling_qwen2_jacobi import Qwen2JacobiForCausalLM
-from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
-from utils import output_abnormal_message, top_accuracy
+from models.qwen2.tokenization_qwen2_fast import Qwen2TokenizerFast
+from utils import output_abnormal_message, top_accuracy, load_jacobi_weight
 
-    
-def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, all_layers_outputs, jacobi_weight, criterion, jacobi_token_nums, discount=1):
-    target_logits = torch.clamp(target_logits, min=-1e2, max=1e2)
-    jacobi_logits = torch.clamp(jacobi_logits, min=-1e2, max=1e2)
-    jacobi_hidden_states = torch.clamp(jacobi_hidden_states, min=-1e3, max=1e3)
-    hidden_state_target = torch.clamp(hidden_state_target, min=-1e3, max=1e3)
+# model setting and load weight config
+inference_config = {
+    "basepath": "./Qwen2.5-0.5B-Instruct",
+    "statepath":"./jacobi-weights/CFG9.9-con/state_3",
+    "jacobi_token_nums": 2,
+    "mix_sequences":1,
+    "projection_frequency":4,
+    "adapter_type":"Qwen2MLP",
+    "shared_adapter":False,
+    "shared_jacobi_token":True,
+    "jacobi_adapter_kwargs":{
+        "intermediate_ratio": None,
+        "clamp":False
+    }
+}
 
-    # cross entropy -> sample distribution difference
-    target_p = nn.Softmax(dim=-1)(target_logits)
-    out_logp = nn.LogSoftmax(dim=-1)(jacobi_logits)
-    plogp = target_p * out_logp
-    plogp = plogp.view(-1, jacobi_token_nums, plogp.shape[-1])
-    ploss = -torch.sum(plogp) / (plogp.shape[0] * plogp.shape[1] + 1e-5)  # Normalize by batch and sequence
-
-    # regression -> hidden states difference
-    vloss_full = criterion(jacobi_hidden_states, hidden_state_target)
-    vloss_full = vloss_full.view(-1, jacobi_token_nums, vloss_full.shape[-1])
-    vloss_full = torch.mean(vloss_full, dim=-1)  
-    vloss = torch.sum(vloss_full) / (vloss_full.shape[0] * vloss_full.shape[1] + 1e-5)
-
-    # Regularization term for Jacobi weight
-    reg_term_jacobi = torch.sum(torch.abs(jacobi_weight.float())) / (jacobi_weight.shape[-1] + 1e-5)   # L1 regularization
-    reg_term_hidden = 0
-    for tensor in all_layers_outputs:
-        reg_term_hidden += torch.sum(tensor.float() ** 2) * (1/2) / (tensor.shape[0] * tensor.shape[1] + 1e-5)
-
-    return vloss, ploss, reg_term_jacobi, reg_term_hidden
-
-
-# CONFIG_PATH = '/content/jacobi-decoding-test/configs/train_config_colab.json'
-CONFIG_PATH = './configs/train_config_local.json'
-PROJECT = 'Jacobi-test'
-GAMMA = 0.9
-
-with open(CONFIG_PATH, 'r') as f:
-    train_config = json.loads(f.read())
-
-with open(f"{train_config['basepath']}/config.json", 'r') as f:
-    model_config = json.loads(f.read())
-
-set_seed(0)
-torch.backends.cuda.matmul.allow_tf32 = True
-
-accelerator = Accelerator(mixed_precision=train_config['mixed_precision'], gradient_accumulation_steps=train_config["gradient_accumulation_steps"])
-
-if accelerator.is_main_process:
-    wandb.login(key=train_config["api_key"])
-    wandb.init(project=PROJECT, name=train_config["name"], config=train_config)
-
-jacobi_adapter_kwargs = train_config["jacobi_adapter_kwargs"]
-tokenizer = Qwen2Tokenizer.from_pretrained(train_config["basepath"], use_fast=False)
+# model / tokenizer
+tokenizer = Qwen2TokenizerFast.from_pretrained(inference_config["basepath"], use_fast=False)
 model = Qwen2JacobiForCausalLM.from_pretrained(
-    pretrained_model_name_or_path=train_config["basepath"],
-    jacobi_token_nums=train_config["jacobi_token_nums"],
-    mix_sequences=train_config["mix_sequences"],
-    proj_freq=train_config["projection_frequency"],
-    adapter_type=train_config["adapter_type"],
-    shared_adapter=train_config["shared_adapter"],
-    shared_jacobi_token=train_config["shared_jacobi_token"],
-    layer_norm=train_config["layer_norm"],
-    jacobi_adapter_kwargs=jacobi_adapter_kwargs,
+    pretrained_model_name_or_path=inference_config["basepath"],
+    jacobi_token_nums=inference_config["jacobi_token_nums"],
+    mix_sequences=inference_config["mix_sequences"],
+    proj_freq=inference_config["projection_frequency"],
+    adapter_type=inference_config["adapter_type"],
+    shared_adapter=inference_config["shared_adapter"],
+    shared_jacobi_token=inference_config["shared_jacobi_token"],
+    jacobi_adapter_kwargs=inference_config["jacobi_adapter_kwargs"],
     torch_dtype="auto",
     device_map="auto"
 )
-
+# load weight
+print(f"Loading model states in {inference_config['statepath']}")
+load_jacobi_weight(model, f"{inference_config["statepath"]}/model.safetensors")
+print("State restored successfully!")
 
 model = model.to('cuda')
-for param in model.model.parameters():
-    param.requires_grad = False
+model.eval()
 
-initialise_method = train_config["initialise_method"] if "initialise_method" in train_config else 'kaiming'
-for name, param in model.named_parameters():
-    if param.requires_grad:   
-        model.init_trainable_weights(name, param, initialise_method)
+# input
+prompt = "Give me a short introduction to large language model."
+messages = [
+    {"role": "system", "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."},
+    {"role": "user", "content": prompt}
+]
+text = tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=True
+)
+model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
+input_ids = model_inputs["input_ids"]
+
+# generate
+# model.decoding_mode = "naive"
+# generated_ids = model.generate(
+#     **model_inputs,
+#     max_new_tokens=32
+# )
+# print(generated_ids)
+
+model.decoding_mode = "jacobi"
+generated_ids = model.jagenerate(
+    input_ids=input_ids,
+    max_new_tokens=32
+)
+print(generated_ids)
+
+
+
 
 # data part
-datapath = list_files(train_config["datapath"])
-traindatapath = datapath[:int(len(datapath) * train_config["train_data_portion"])]
-testdatapath = datapath[int(len(datapath) * train_config["test_data_portion"]):]
+# datapath = list_files(train_config["datapath"])
+# testdatapath = datapath[int(len(datapath) * train_config["test_data_portion"]):]
+# testdataset = CustomDataset(testdatapath, jacobi_tokens=train_config["jacobi_token_nums"], use_multi_token_sets=train_config["use_multi_token_sets"], pad_id=train_config['pad_token_id'], vocab_size=model_config['vocab_size'])
+# test_loader = DataLoader(testdataset, batch_size=train_config["bs"], shuffle=False, collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"], pin_memory=True)
 
-shuffle_data = True
-if train_config["debug_mode"]:
-    shuffle_data = False
-    traindatapath = datapath[:4]
-    testdatapath = datapath[int(len(datapath) * 0.1):int(len(datapath) * 0.15)]
-print(f"train data: {len(traindatapath)}")
-print(f"test data: {len(testdatapath)}")
-
-traindataset = CustomDataset(traindatapath, jacobi_tokens=train_config["jacobi_token_nums"], use_multi_token_sets=train_config["use_multi_token_sets"], pad_id=train_config['pad_token_id'], vocab_size=model_config['vocab_size'])
-testdataset = CustomDataset(testdatapath, jacobi_tokens=train_config["jacobi_token_nums"], use_multi_token_sets=train_config["use_multi_token_sets"], pad_id=train_config['pad_token_id'], vocab_size=model_config['vocab_size'])
-
-train_loader = DataLoader(traindataset, batch_size=train_config["bs"], shuffle=shuffle_data,
-                          collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"],
-                          pin_memory=True)
-test_loader = DataLoader(testdataset, batch_size=train_config["bs"], shuffle=False,
-                         collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"], pin_memory=True)
-
-if accelerator.is_main_process:
-    if not os.path.exists(train_config["cpdir"]):
-        os.makedirs(train_config["cpdir"])
-
-criterion = nn.SmoothL1Loss(reduction="none")  
-optimizer = optim.AdamW(model.parameters(), lr=train_config["lr"], betas=(train_config["b1"], train_config["b2"]))
-
-num_epochs = train_config["num_epochs"]
-num_warmup_steps = train_config["num_warmup_steps"]
-total_steps = train_config["total_steps"]
-is_warmup = train_config["is_warmup"]
-jacobi_token_nums = train_config["jacobi_token_nums"]
-debug_mode = train_config["debug_mode"]
-if is_warmup:
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps,
-                                                num_training_steps=total_steps)
-
-    model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
-        model, optimizer, train_loader, test_loader, scheduler
-    )
-else:
-    model, optimizer, train_loader, test_loader = accelerator.prepare(
-        model, optimizer, train_loader, test_loader
-    )
-
-if train_config["statepath"] is not None:
-    # Load accelerator state
-    print("Loading model, optimizer, and scheduler states in {train_config['statepath']}")
-    accelerator.load_state(train_config["statepath"])
-
-    # Restore random states
-    # random_state_file = os.path.join(train_config["statepath"], "random_states_0.pkl")
-    # with open(random_state_file, "rb") as f:
-    #     random_states = pickle.load(f)
-
-    # torch.random.set_rng_state(random_states["torch"])
-    # torch.cuda.random.set_rng_state(random_states["cuda"])
-
-    print("State restored successfully!")
-
+"""
 continuous_loss_nan = 0
 epoch_counts = []
 previous_data = []
@@ -393,3 +333,5 @@ for epoch in range(num_epochs + 1):
             accelerator.save_state(output_dir=f"{train_config['cpdir']}/{train_config['name']}/state_{epoch}")
 
 torch.save(torch.stack(epoch_counts, dim=0), f"{train_config['cpdir']}/{train_config['name']}epoch_counts.pt")
+
+"""

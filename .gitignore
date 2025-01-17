@@ -4,3 +4,5 @@ data_root*
 record*
 samples*
 memo*
+wandb*
+jacobi-weights*

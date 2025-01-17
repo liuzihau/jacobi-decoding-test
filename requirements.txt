@@ -1,5 +1,7 @@
 datasets
-torch==2.5.1
-transformers==4.47.0
 tqdm
 wandb
+# torch==2.5.1
+transformers==4.47.0
+accelerate
+safetensors
