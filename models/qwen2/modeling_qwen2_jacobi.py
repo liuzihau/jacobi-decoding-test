@@ -572,15 +572,18 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         input_ids = torch.cat([input_ids]+[padding]*self.jacobi_token_nums, dim=-1)
         loss_mask = []
         prev_index = []
+        jacobi_index = []
         for i in range(input_ids.shape[0]):
             jacobi_indices = torch.nonzero(input_ids[i] == -1, as_tuple=True)
             jacobi_indices_groups = jacobi_indices[0].view(-1, self.jacobi_token_nums)
             prev_index.append(jacobi_indices_groups[:, 0] - 1)
+            jacobi_index.append(jacobi_indices_groups)
             mask = torch.zeros_like(input_ids[i], device=input_ids.device)
             mask[jacobi_indices] = 1
             input_ids[i, jacobi_indices[0]] = 0
             loss_mask.append(mask)
         prev_index = torch.stack(prev_index, dim=0)
+        jacobi_index = torch.stack(jacobi_index, dim=0)
         loss_mask = torch.stack(loss_mask, dim=0)
 
         output = self.forward(
@@ -592,11 +595,13 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             return_dict=True
             )
         for i in range(output["logits"].shape[0]):
-            print(output["logits"][i, prev_index[i]])
-        print(output["jacobi_logits"].shape)
-        _, pred = output["jacobi_logits"].topk(3, -1, True, True)
-        print(pred.shape)
-        print(pred)
+            _, top3_pred_normal = output["logits"][i, prev_index[i]].topk(3, -1, True, True) 
+            _, top3_pred_jacobi = output["logits"][i, jacobi_index[i]].topk(3, -1, True, True) 
+            print(top3_pred_normal, top3_pred_jacobi)
+
+        # _, pred = output["jacobi_logits"].topk(3, -1, True, True)
+        # print(pred.shape)
+        # print(pred)
         # for key_cache in output.past_key_values.key_cache:
         #     print(key_cache.shape)
 
