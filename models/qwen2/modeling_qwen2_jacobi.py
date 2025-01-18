@@ -444,11 +444,14 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 cache_position=cache_position,
                 )
             hidden_states = outputs[0]
-            all_hidden_states = outputs["hidden_states"]
             logits = self.lm_head(hidden_states)
+
+            if output_hidden_states:
+                all_hidden_states = outputs["hidden_states"]
+                jacobi_all_hidden_states = []
         
             # Iterate through the batch dimension
-            jacobi_hidden_states, jacobi_all_hidden_states, jacobi_logits = [], [], []
+            jacobi_hidden_states, jacobi_logits = [], []
 
             # max_sequence = 0
             for i in range(hidden_states.shape[0]):
@@ -456,24 +459,27 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 jacobi_hidden_states.append(hidden_states[i, replace_indices, :])
                 jacobi_logits.append(logits[i, replace_indices, :])
                 
-                temp = []
-                for mid_hidden_state in all_hidden_states:
-                    temp.append(mid_hidden_state[i, replace_indices, :])
-                jacobi_all_hidden_states.append(torch.stack(temp, dim=0))  # (layers, seq, hidden)
+                if output_hidden_states:
+                    temp = []
+                    for mid_hidden_state in all_hidden_states:
+                        temp.append(mid_hidden_state[i, replace_indices, :])
+                    jacobi_all_hidden_states.append(torch.stack(temp, dim=0))  # (layers, seq, hidden)
 
             jacobi_hidden_states = torch.cat(jacobi_hidden_states, dim=0)
-            jacobi_all_hidden_states = torch.cat(jacobi_all_hidden_states, dim=1)  # (layers, seqs, hidden) ~= 24, 194, 896
             jacobi_logits = torch.cat(jacobi_logits, dim=0)
+            if output_hidden_states:
+                jacobi_all_hidden_states = torch.cat(jacobi_all_hidden_states, dim=1)  # (layers, seqs, hidden) ~= 24, 194, 896
 
             if not return_dict:
                 output = (logits,) + outputs[1:]
                 return output
 
             return JacobiCausalLMOutputWithPast(
+                logits=logits,
                 jacobi_logits=jacobi_logits,
                 past_key_values=outputs.past_key_values,
                 jacobi_hidden_states=jacobi_hidden_states,
-                jacobi_all_hidden_states=jacobi_all_hidden_states,
+                jacobi_all_hidden_states=jacobi_all_hidden_states if output_hidden_states else None,
                 attentions=outputs.attentions,
             )
 
@@ -520,9 +526,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             max_new_tokens=512,
             max_length=2048,
             log=False,
-            is_llama3=False,
-
-    ):
+            is_llama3=False
+            ):
         if is_llama3:
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
         
@@ -565,21 +570,35 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # do the first inference
         input_len = input_ids.shape[1]
         input_ids = torch.cat([input_ids]+[padding]*self.jacobi_token_nums, dim=-1)
+        loss_mask = []
+        prev_index = []
+        for i in range(input_ids.shape[0]):
+            jacobi_indices = torch.nonzero(input_ids[i] == -1, as_tuple=True)
+            jacobi_indices_groups = jacobi_indices[0].view(-1, self.jacobi_token_nums)
+            prev_index.append(jacobi_indices_groups[:, 0] - 1)
+            mask = torch.zeros_like(input_ids[i], device=input_ids.device)
+            mask[jacobi_indices] = 1
+            input_ids[i, jacobi_indices[0]] = 0
+            loss_mask.append(mask)
+        prev_index = torch.stack(prev_index, dim=0)
+        loss_mask = torch.stack(loss_mask, dim=0)
 
-        jacobi_indices = torch.nonzero(input_ids == -1, as_tuple=True)
-        loss_mask = torch.zeros_like(input_ids, device=input_ids.device)
-        loss_mask[jacobi_indices] = 1
-        input_ids[jacobi_indices] = 0
         output = self.forward(
             input_ids=input_ids,
             loss_mask=loss_mask,
             past_key_values=past_key_values,
             use_cache=True,
-            output_hidden_states=True,
+            output_hidden_states=False,
             return_dict=True
             )
-        
-        print(output)
+        for i in range(output["logits"].shape[0]):
+            print(output["logits"][i, prev_index[i]])
+        print(output["jacobi_logits"].shape)
+        _, pred = output["jacobi_logits"].topk(3, -1, True, True)
+        print(pred.shape)
+        print(pred)
+        # for key_cache in output.past_key_values.key_cache:
+        #     print(key_cache.shape)
 
         reset_tree_mode(self)
         draft_tokens, retrieve_indices,tree_mask,tree_position_ids, logits, hidden_state, sample_token = initialize_tree(
