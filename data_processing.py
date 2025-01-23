@@ -114,28 +114,10 @@ class DataCollatorWithPadding:
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         max_length = max(len(item['loss_mask']) for item in features)
         batch_input_ids = torch.cat([self.paddingtensor2D(item['input_ids'], max_length) for item in features])
-        # batch_hidden_states = torch.cat([self.paddingtensor(item['hidden_state_big'], max_length) for item in features])
-        # batch_target = torch.cat([self.paddingtensor(item['target'], max_length) for item in features])
-        # batch_loss_mask = torch.tensor(
-        #     [item['loss_mask'] + [0] * (max_length - len(item['loss_mask'])) for item in features])
         batch_attention_mask = torch.tensor(
             [item['attention_mask'] + [0] * (max_length - len(item['attention_mask'])) for item in features])
         batch_loss_mask = torch.tensor(
             [item['loss_mask'] + [0] * (max_length - len(item['loss_mask'])) for item in features])
-
-        # max_hidden_counts = max(item['hidden_state_target'].shape[1] for item in features)
-        # hidden_dim, hidden_dtype, hidden_device = features[0]['hidden_state_target'].shape[-1], features[0]['hidden_state_target'].dtype, features[0]['hidden_state_target'].device
-        # target_dtype, target_device = features[0]['target'].dtype, features[0]['target'].device
-        # for item in features:
-        #     curr_seq = item['hidden_state_target'].shape[1]
-        #     if curr_seq < max_hidden_counts:
-        #         seq_pad_hidden = torch.zeros((1, (max_hidden_counts - curr_seq), hidden_dim), dtype=hidden_dtype, device=hidden_device) 
-        #         seq_pad_target = torch.zeros((1, (max_hidden_counts - curr_seq)), dtype=target_dtype, device=target_device)
-        #         item['hidden_state_target'] = torch.cat([item['hidden_state_target'], seq_pad_hidden], dim=1)
-        #         item['target'] = torch.cat([item['target'], seq_pad_target], dim=1)
-
-        # batch_loss_mask = torch.ones_like(batch_loss_mask)
-        # batch_attention_mask=torch.ones_like(batch_attention_mask)
         batch = {
             "input_ids": batch_input_ids,
             # "hidden_state_target": torch.cat([item['hidden_state_target'] for item in features]),
@@ -147,63 +129,16 @@ class DataCollatorWithPadding:
         }
         return batch
 
-if __name__ == "__main__":
-    from torch.utils.data import DataLoader
-    from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+class InferenceDataset(Dataset):
+    def __init__(self, datapath):
+        self.data = datapath
 
-    train_config = {
-    "basepath_local": "./Qwen2.5-0.5B-Instruct",
-    "datapath": "./data_root/ShareGPT_Vicuna_unfiltered_Qwen2.5-0.5B-Instruct",
-    "bs": 2,
-    "jacobi_tokens":5,
-    "num_workers": 0
-    }
+    def __len__(self):
+        return len(self.data)
 
-    datapath = list_files(train_config["datapath"])
-    traindatapath = datapath  #[:int(len(datapath) * 0.95)]
+    def __getitem__(self, index):
+        new_data = {}
 
-    traindataset = CustomDataset(traindatapath, jacobi_tokens=train_config["jacobi_tokens"], use_multi_token_sets=True)
-    train_loader = DataLoader(traindataset, batch_size=train_config["bs"], shuffle=True,
-                            collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"],
-                            pin_memory=True)
-
-    tokenizer = Qwen2Tokenizer.from_pretrained(train_config["basepath_local"], use_fast=False)
-    for data in train_loader:
-        print("="*50)
-        for key in data:
-            if (key in ['loss_mask','attention_mask']):
-                print(key, data[key].shape, torch.sum(data[key], dim=-1))
-            else:
-                print(key, data[key].shape)
-            
-        # for batch_idx in range(data['input_ids'].shape[0]):
-        #     tokens = data['input_ids'][batch_idx].tolist()
-        #     print(f"sentense {batch_idx}:")
-        #     idx = 0
-        #     sentense = ""
-        #     length = torch.sum(data['attention_mask'][batch_idx], dim=-1)
-        #     target_list = data['target'][batch_idx].tolist()
-        #     for i, (t, loss) in enumerate(zip(tokens, data['loss_mask'][batch_idx])):
-        #         if i >= length:
-        #             continue
-        #         if t == 153961:
-        #             decode = "|special|"
-        #             target = tokenizer.decode([target_list[idx]])
-        #             idx += 1
-        #         else:
-        #             decode = tokenizer.decode([t])
-        #             target = ""
-        #         if '\n' in decode:
-        #             decode = decode.replace('\n', '\\n')
-        #         if '\n' in target:
-        #             target = target.replace('\n', '\\n')
-        #         sentense += f"<[{i}-{loss}][{decode}][{target}]> "
-        #     print(sentense)
-
-        # loss_mask = data['loss_mask']
-        # replace_indices = torch.nonzero(loss_mask[0] == 1, as_tuple=True)[0]
-        # print(replace_indices)
-        # break
-        
-
-        
+        raw_data = torch.load(self.data[index])
+        input_ids = raw_data['input_ids']#[:self.max_len][None, :]
+        return input_ids

@@ -1,0 +1,35 @@
+{
+    "basepath": "./Qwen2.5-0.5B-Instruct",
+    "statepath": "./jacobi-weights/CFG9.9-con/state_3",
+    "datapath": "./data_root/ShareGPT_Vicuna_unfiltered_Qwen2.5-0.5B-Instruct",
+    "jacobi_token_nums": 2,
+    "mix_sequences": 1,
+    "projection_frequency": 4,
+    "adapter_type": "Qwen2MLP",
+    "jacobi_adapter_kwargs":{
+        "intermediate_ratio": null,
+        "clamp":false
+    },
+    "shared_adapter": false,
+    "shared_jacobi_token": true,
+    "test_data_portion": 0.95,
+    "bs": 1,
+    "num_workers": 2,
+    "max_new_tokens": 128,
+    "naive_kwargs":{
+        "do_sample":false,
+        "num_beams":1,
+        "top_p":1,
+        "top_k":50,
+        "repetition_penalty":1,
+        "temperature":1
+    },
+    "jacobi_kwargs":{
+        "do_sample":false,
+        "num_beams":1,
+        "top_p":1,
+        "top_k":50,
+        "repetition_penalty":1,
+        "temperature":1
+    }
+}
