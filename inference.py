@@ -6,10 +6,10 @@ import torch
 from torch.utils.data import DataLoader
 from accelerate.utils import set_seed
 
-from data_processing import InferenceDataset, list_files
+from tools.data_processing import InferenceDataset, list_files
+from tools.utils import load_jacobi_weight
 from models.qwen2.modeling_qwen2_jacobi import Qwen2JacobiForCausalLM
 from models.qwen2.tokenization_qwen2_fast import Qwen2TokenizerFast
-from utils import load_jacobi_weight
 
 def naive_decoding(model, input_ids, attention_mask, max_new_tokens=128, do_sample=False, num_beams=1, top_p=1.0, top_k=50, repetition_penalty=1.0, temperature=1.0):
     model.decoding_mode = "naive"

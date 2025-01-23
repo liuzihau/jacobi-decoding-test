@@ -16,7 +16,7 @@ from transformers.generation.logits_process import (
 from transformers.utils import ModelOutput
 
 from models.qwen2.modeling_qwen2 import Qwen2PreTrainedModel, Qwen2Model, Qwen2RMSNorm
-from tree_structure import TreeStructure, InputProcessor
+from tools.tree_structure import TreeStructure, InputProcessor
 
 @dataclass
 class JacobiCausalLMOutputWithPast(ModelOutput):

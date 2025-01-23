@@ -13,10 +13,10 @@ from transformers import AutoConfig, get_linear_schedule_with_warmup
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 
-from data_processing import CustomDataset, DataCollatorWithPadding, list_files
+from tools.data_processing import CustomDataset, DataCollatorWithPadding, list_files
+from tools.utils import top_accuracy
 from models.qwen2.modeling_qwen2_jacobi import Qwen2JacobiForCausalLM
 from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
-from utils import output_abnormal_message, top_accuracy
 
     
 def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, all_layers_outputs, jacobi_weight, criterion, jacobi_token_nums, discount=1):
