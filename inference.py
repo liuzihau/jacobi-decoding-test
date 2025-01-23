@@ -41,8 +41,8 @@ def jacobi_decoding(model, input_ids, max_new_tokens=128, do_sample=False, num_b
     return generated_ids, tt, ct
 
 # environment
-CONFIG_PATH = './configs/inference_config_local.json'
-# CONFIG_PATH = './configs/inference_config_colab.json'
+# CONFIG_PATH = './configs/inference_config_local.json'
+CONFIG_PATH = './configs/inference_config_colab.json'
 with open(CONFIG_PATH, 'r') as f:
     inference_config = json.loads(f.read())
 set_seed(0)
@@ -74,7 +74,7 @@ model.eval()
 
 # data part
 datapath = list_files(inference_config["datapath"])
-testdatapath = datapath#[int(len(datapath) * inference_config["test_data_portion"]):]
+testdatapath = datapath[int(len(datapath) * inference_config["test_data_portion"]):]
 testdataset = InferenceDataset(testdatapath)
 test_loader = DataLoader(testdataset, batch_size=inference_config["bs"], shuffle=False, 
                          num_workers=inference_config["num_workers"], pin_memory=True)
