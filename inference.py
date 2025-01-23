@@ -28,15 +28,21 @@ def naive_decoding(model, input_ids, attention_mask, max_new_tokens=128, do_samp
 
 def jacobi_decoding(model, input_ids, max_new_tokens=128, do_sample=False, num_beams=1, top_p=1.0, top_k=50, repetition_penalty=1.0, temperature=1.0, force_autoregressive=False):
     model.decoding_mode = "jacobi"
-    generated_ids = model.jagenerate(
+    generated_ids, tt, ct = model.jagenerate(
         input_ids=input_ids,
         max_new_tokens=max_new_tokens,
+        do_sample=do_sample,
+        top_p=top_p,
+        top_k=top_k,
+        repetition_penalty=repetition_penalty,  # Disable repetition penalty
+        temperature=temperature,
         force_autoregressive=force_autoregressive
         )
-    return generated_ids
+    return generated_ids, tt, ct
 
 # environment
 CONFIG_PATH = './configs/inference_config_local.json'
+# CONFIG_PATH = './configs/inference_config_colab.json'
 with open(CONFIG_PATH, 'r') as f:
     inference_config = json.loads(f.read())
 set_seed(0)
@@ -59,7 +65,7 @@ model = Qwen2JacobiForCausalLM.from_pretrained(
 
 # load weight
 print(f"Loading model states in {inference_config['statepath']}")
-load_jacobi_weight(model, f"{inference_config["statepath"]}/model.safetensors")
+load_jacobi_weight(model, f"{inference_config['statepath']}/model.safetensors")
 print("State restored successfully!")
 
 model = model.to('cuda')
@@ -68,7 +74,7 @@ model.eval()
 
 # data part
 datapath = list_files(inference_config["datapath"])
-testdatapath = datapath[int(len(datapath) * inference_config["test_data_portion"]):]
+testdatapath = datapath#[int(len(datapath) * inference_config["test_data_portion"]):]
 testdataset = InferenceDataset(testdatapath)
 test_loader = DataLoader(testdataset, batch_size=inference_config["bs"], shuffle=False, 
                          num_workers=inference_config["num_workers"], pin_memory=True)
@@ -76,6 +82,7 @@ test_loader = DataLoader(testdataset, batch_size=inference_config["bs"], shuffle
 # evaluate
 prefix = torch.tensor([[151644,  77091,    198]])
 n_tokens, ja_tokens, j_tokens, n_time, ja_time, j_time = 0, 0, 0, 0, 0, 0
+total, correct =0, {}
 for batch_idx, data in enumerate(tqdm(test_loader)):
     text = torch.cat([data, prefix], dim=-1).to(model.device)
     attention_mask = torch.ones_like(text)
@@ -87,17 +94,22 @@ for batch_idx, data in enumerate(tqdm(test_loader)):
     n_time += naive_delta
     
     jacobi_ar_start =  time.time()
-    ja = jacobi_decoding(model, text, inference_config["max_new_tokens"], force_autoregressive=True, **inference_config["naive_kwargs"])
+    ja, _, _ = jacobi_decoding(model, text, inference_config["max_new_tokens"], force_autoregressive=True, **inference_config["naive_kwargs"])
     jacobi_ar_delta = time.time() - jacobi_ar_start
     ja_tokens += ja.shape[1]
     ja_time += jacobi_ar_delta
     
-    
     jacobi_start =  time.time()
-    j = jacobi_decoding(model, text, inference_config["max_new_tokens"], force_autoregressive=False, **inference_config["naive_kwargs"])
+    j, tt, ct = jacobi_decoding(model, text, inference_config["max_new_tokens"], force_autoregressive=False, **inference_config["naive_kwargs"])
     jacobi_delta = time.time() - jacobi_start
     j_tokens += j.shape[1]
     j_time += jacobi_delta
+    total += tt
+    for key in ct:
+        if key in correct:
+            correct[key] += ct[key]
+        else:
+            correct[key] = ct[key]
 
     if batch_idx % 100 == 0:
         print(f"batch {batch_idx}")
@@ -112,5 +124,25 @@ for batch_idx, data in enumerate(tqdm(test_loader)):
         res = tokenizer.decode(j[0].detach().cpu().tolist())
         print(f"Res: {res}")
 
+print(total, correct)
 print(f"[token generated] naive: {n_tokens}, jacobi_ar: {ja_tokens}, jacobi: {j_tokens}")
 print(f"[final speed compare] naive: {n_tokens / n_time:.3f}(tokens/sec), jacobi_ar: {ja_tokens / ja_time:.3f}(tokens/sec), jacobi: {j_tokens / j_time:.3f}(tokens/sec)")
+
+keys = sorted(correct.keys(), key=lambda x: (len(x), x[0]))
+accept_rate = {}
+for key in keys:
+    if len(key) == 1:
+        token_name = key[0]
+        accept_rate[token_name] = {}
+        accept_rate[token_name]['accept_rate'] = correct[key] / total
+    elif len(key) == 2:
+        token_name = key[0]
+        sub_token_name = key[1]
+        accept_rate[token_name][sub_token_name] = correct[key] / correct[(key[0],)]
+
+with open(inference_config["reportpath"], "w") as f:
+    json.dump(accept_rate, f, indent=4)  # Use indent for pretty formatting
+
+for key in accept_rate:
+    print(key)
+    print(accept_rate[key])

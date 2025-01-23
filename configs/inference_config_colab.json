@@ -1,7 +1,8 @@
 {
     "basepath": "/content/drive/MyDrive/LLMs_weight/qwen/checkpoints/Qwen2.5-0.5B-Instruct",
-    "statepath": "/content/drive/MyDrive/jacobi-weights/CFG9.9-con/state_3",
+    "statepath": "/content/drive/MyDrive/jacobi_test_weights/CFG9.9-con/state_3",
     "datapath": "/content/drive/MyDrive/datasets/ShareGPT_Vicuna_unfiltered_Qwen2.5-0.5B-Instruct",
+    "reportpath": "/content/drive/MyDrive/accept_rate.json",
     "jacobi_token_nums": 2,
     "mix_sequences": 1,
     "projection_frequency": 4,

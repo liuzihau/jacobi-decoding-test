@@ -1,7 +1,8 @@
 {
     "basepath": "./Qwen2.5-0.5B-Instruct",
-    "statepath": "./jacobi-weights/CFG9.9-con/state_3",
+    "statepath": "./jacobi_test_weights/CFG9.9-con/state_3",
     "datapath": "./data_root/ShareGPT_Vicuna_unfiltered_Qwen2.5-0.5B-Instruct",
+    "reportpath": "./accept_rate.json",
     "jacobi_token_nums": 2,
     "mix_sequences": 1,
     "projection_frequency": 4,

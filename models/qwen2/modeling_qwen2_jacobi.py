@@ -535,37 +535,28 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     def jagenerate(
             self,
             input_ids,
-            temperature=0.0,
-            top_p=0.0,
-            top_k=0.0,
             max_new_tokens=512,
             max_length=2048,
-            log=False,
+            do_sample=False,
+            top_p=0.0,
+            top_k=0.0,
+            repetition_penalty=1.0,
+            temperature=0.0,
             force_autoregressive=False,
             tokenizer=None
             ):
         
-        # if model_name == "llama3":
-        #     stop_token_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
-        # elif model_name == "Qwen":
-        #     stop_token_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-        
-        # if temperature > 1e-5:
-        #     logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
-        # else:
-        #     logits_processor = None
-        
         input_processor = InputProcessor(input_ids.dtype, torch.float32, input_ids.dtype, input_ids.device, self.jacobi_token_nums)
         past_key_values = DynamicCache()
+        tt = 0
+        ct = {}
 
         # do the first inference
         padding=(torch.zeros(1,1,dtype=torch.long)-1).to(input_ids.device)
-        input_len = input_ids.shape[1]
         input_ids = input_ids.clone()
         input_ids = torch.cat([input_ids]+[padding]*self.jacobi_token_nums, dim=-1)
         loss_mask = []
-        prev_index = []
-        jacobi_index = []
+        prev_index, jacobi_index = [], []
         for i in range(input_ids.shape[0]):
             jacobi_indices = torch.nonzero(input_ids[i] == -1, as_tuple=True)
             jacobi_indices_groups = jacobi_indices[0].view(-1, self.jacobi_token_nums)
@@ -578,7 +569,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         prev_index = torch.stack(prev_index, dim=0)
         jacobi_index = torch.stack(jacobi_index, dim=0)
         loss_mask = torch.stack(loss_mask, dim=0)
-        # print(tokenizer.decode(input_ids[0].detach().cpu().tolist()))
+
         output = self.forward(
             input_ids=input_ids,
             loss_mask=loss_mask,
@@ -598,7 +589,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         normal_token_dist = nn.Softmax(dim=-1)(output["logits"][i, prev_index[i]])
         jacobi_token_dist = nn.Softmax(dim=-1)(output["logits"][i, jacobi_index[i]])
         normal_token = decoding_normal_token(normal_token_dist, temperature, top_p, top_k)
-        jacobi_token = decoding_jacobi_token(jacobi_token_dist, temperature, top_p, top_k)
+        jacobi_token, jacobi_token_p = decoding_jacobi_token(jacobi_token_dist, temperature, top_p, top_k)
         current_decoded_tokens = normal_token.view(1, -1)
 
         # normal_token_dist = nn.Softmax(dim=-1)(output["logits"][0])
@@ -620,7 +611,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             for no in range(jacobi_token.shape[0]):
                 for node in tree.layers[-1]:
                     for kth_token_idx in range(jacobi_token[no].shape[0]):
-                        tree.add_node(jacobi_token[no, kth_token_idx].detach().cpu().item(), 0.1, node, None)
+                        # p = node.route_prob * jacobi_token_p[no, kth_token_idx].detach().cpu().item()
+                        tree.add_node(jacobi_token[no, kth_token_idx].detach().cpu().item(), jacobi_token_p[no, kth_token_idx].detach().cpu().item(), node, None)
             ith_input_ids, ith_attention_mask, ith_loss_mask, ith_cache_position = input_processor.build_inputs(tree)
             # for k, layer in enumerate(tree.layers):
             #     for node in layer:
@@ -662,7 +654,14 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             token_sampled = decoding_normal_token(token_dist, temperature, top_p, top_k)
             
             # verify
-            route_indices = verify_final_route(input_ids[i], token_sampled, trees[i], force_autoregressive, tokenizer)
+            route_indices, ans_list = verify_final_route(input_ids[i], token_sampled, trees[i], force_autoregressive, tokenizer)
+            tt += 1
+            for i in range(len(ans_list)):
+                if tuple(ans_list[:i+1]) in ct:
+                    ct[tuple(ans_list[:i+1])] += 1
+                else:
+                    ct[tuple(ans_list[:i+1])] = 1
+            
             verified_tokens = token_sampled[route_indices]
             current_decoded_tokens = torch.cat([current_decoded_tokens, verified_tokens.view(1, -1)], dim=-1)
             if self.confg.eos_token_id in current_decoded_tokens:
@@ -687,121 +686,33 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             jacobi_index_end = jacobi_index_start + self.jacobi_token_nums
             jacobi_indices = torch.arange(jacobi_index_start, jacobi_index_end)
             jacobi_token_dist = token_dist[jacobi_indices]
-            jacobi_token = decoding_jacobi_token(jacobi_token_dist, temperature, top_p, top_k)
+            jacobi_token, jacobi_token_p = decoding_jacobi_token(jacobi_token_dist, temperature, top_p, top_k)
+        return current_decoded_tokens[:max_new_tokens], tt, ct
 
-        return current_decoded_tokens[:max_new_tokens]
-
-
-        
-        """
-            # print(tokenizer.decode((token_sampled[route_indices].detach().cpu().tolist())))
-            # print(jacobi_token)
-            # print(tokenizer.decode())
-            s = decoding_normal_token(output["logits"][i])
-            for a, b, k in zip(input_ids[0], s, cache_position[i]):
-                a = tokenizer.decode([a.item()])
-                a = a.replace("\n", "\\n")
-                b = tokenizer.decode([b.item()])
-                b = b.replace("\n", "\\n")
-                print(f"[{k}th] input token: <{a}>, output token: <{b}>")
-            return input_ids[0].detach().cpu().tolist(), s.detach().cpu().tolist()
-            # normal_token_dist = nn.Softmax(dim=-1)(output["logits"][i, prev_index[i]])
-            # jacobi_token_dist = nn.Softmax(dim=-1)(output["logits"][i, jacobi_index[i]])
-        # verify_route(output)
-        # handle kv         
-        print(output)
-        """
-
-        # for i in range(output["logits"].shape[0]):
-        #     _, top3_pred_normal = output["logits"][i, prev_index[i]].topk(3, -1, True, True) 
-        #     _, top3_pred_jacobi = output["logits"][i, jacobi_index[i]].topk(3, -1, True, True) 
-        #     print(top3_pred_normal, top3_pred_jacobi)
-
-        # _, pred = output["jacobi_logits"].topk(3, -1, True, True)
-        # print(pred.shape)
-        # print(pred)
-        # for key_cache in output.past_key_values.key_cache:
-        #     print(key_cache.shape)
-
-        reset_tree_mode(self)
-        draft_tokens, retrieve_indices,tree_mask,tree_position_ids, logits, hidden_state, sample_token = initialize_tree(
-            input_ids, self, past_key_values, logits_processor
-        )
-        new_token = 0
-
-        for idx in range(max_length):
-            #with Timer("all"):
-            self.base_model.model.tree_mask = tree_mask
-
-            draft_tokens=draft_tokens.to(input_ids.device)
-            #with Timer("tree_decoding"):
-            logits, hidden_state_new, outputs = tree_decoding(
-                self,
-                draft_tokens,
-                past_key_values,
-                tree_position_ids,
-                input_ids,
-                retrieve_indices,
-            )
-            #retrieve_indices=tree_buffers["retrieve_indices"]
-            #logits = logits[0, retrieve_indices]
-            draft_tokens=torch.cat((draft_tokens,padding),dim=1)
-            candidates=draft_tokens[0,retrieve_indices]
-            best_candidate, accept_length, sample_p = evaluate_posterior(
-                logits, candidates, logits_processor
-            )
-            # print(accept_length)
-            #with Timer("update_inference_inputs"):
-            input_ids, draft_tokens, retrieve_indices,tree_mask,tree_position_ids, new_token, hidden_state, sample_token = update_inference_inputs(
-                input_ids,
-                candidates,
-                best_candidate,
-                accept_length,
-                retrieve_indices,
-                logits_processor,
-                new_token,
-                past_key_values_data,
-                current_length_data,
-                self,
-                hidden_state_new,
-                sample_p
-            )
-
-            if is_llama3:
-                if stop_token_id in input_ids[0, input_len:].tolist():
-                    break
-
-            if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
-                break
-            if new_token > max_new_tokens:
-                break
-            if input_ids.shape[1] > max_length:
-                break
-        if not log:
-            return input_ids
-        else:
-            return input_ids, new_token, idx
 
 def decoding_normal_token(normal_token_dist, temperature=0.0, top_p=0.0, top_k=0.0):
     # greedy
-    if temperature == 0 and top_p == 0 and top_k == 0:
-        return normal_token_dist.argmax(dim=-1)
+    # if temperature == 0 and top_p == 0 and top_k == 0:
+    return normal_token_dist.argmax(dim=-1)
 
-def decoding_jacobi_token(jacobi_token_dist, temperature=0.0, top_p=0.0, top_k=0.0):
+def decoding_jacobi_token(jacobi_token_dist, temperature=0.0, top_p=0.0, top_k=0):
     # top_3
-    if temperature == 0 and top_p == 0 and top_k == 0:
-        return jacobi_token_dist.argsort(dim=-1, descending=True)[:, :3]
+    # if temperature == 0 and top_p == 0 and top_k == 0:
+    top = torch.topk(jacobi_token_dist, 3, dim=-1)
+    topk_index, topk_p = top.indices, top.values
+    return topk_index, topk_p
+
 
 def verify_final_route(inputs, outputs, tree, force_autoregressive=False, tokenizer=None):
     # print("="*100)
     curr_node = tree.root
     index = tree.index_dict[curr_node]
-    curr_ans, final_route = outputs[index], curr_node.route
+    curr_ans, final_route, ans_list = outputs[index], curr_node.route, []
     if not force_autoregressive:
         found_ans = True
         while len(curr_node.children) > 0 and found_ans:
             found_ans = False
-            for node in curr_node.children:
+            for i, node in enumerate(curr_node.children):
                 index = tree.index_dict[node]
                 curr_pred, next_ans = inputs[index], outputs[index]
 
@@ -816,9 +727,10 @@ def verify_final_route(inputs, outputs, tree, force_autoregressive=False, tokeni
                     curr_ans = next_ans
                     curr_node = node
                     found_ans = True
+                    ans_list.append(i)
                     break
 
-    return final_route
+    return final_route, ans_list
 
 def prepare_logits_processor(
         temperature: float = 0.0,
@@ -837,97 +749,3 @@ def prepare_logits_processor(
         if top_k > 0:
             processor_list.append(TopKLogitsWarper(top_k))
     return processor_list
-
-
-def initialize_past_key_values(model):
-    """
-    Initialize past key and value states for a given transformer model.
-
-    This function prepares key-value cache structures for the model, allowing it to store and reuse
-    past key and value states during autoregressive decoding, which can improve efficiency.
-
-    Args:
-        model (nn.Module): The transformer model for which past key-value states need to be initialized.
-
-    Returns:
-        tuple:
-            - past_key_values (list): A list of KVCache objects for each layer in the model.
-            - past_key_values_data (torch.Tensor): The tensor that will store all keys and values.
-            - current_length_data (torch.Tensor): A tensor tracking the current length of keys/values in the cache.
-    """
-    # Extracting configuration from the model
-    config = model.config
-    # Initializing the batch size to 1, this can be modified if different batch sizes are required
-    batch_size = 1
-    # Initializing a tensor to store past keys and values for all layers
-
-    devices=[]
-    for i in range(config.num_hidden_layers):
-        try:
-            device = model.model.layers[i].self_attn.q_proj.weight.device
-        except:
-            device=model.layers[i].self_attn.q_proj.weight.device
-        devices.append(device)
-    past_key_values_data_list=[]
-    startnum=0
-    startdevice=devices[0]
-    for id,i in enumerate(devices):
-        if startdevice!=i:
-            past_key_values_data = torch.zeros(
-                startnum * 2,
-                batch_size,
-                config.num_key_value_heads,
-                config.max_position_embeddings,
-                config.hidden_size // config.num_attention_heads,
-                device=startdevice,
-                dtype=model.dtype,
-            )
-            past_key_values_data_list.append(past_key_values_data)
-            startdevice = i
-            startnum=0
-        startnum += 1
-    past_key_values_data = torch.zeros(
-        startnum * 2,
-        batch_size,
-        config.num_key_value_heads,
-        config.max_position_embeddings,
-        config.hidden_size // config.num_attention_heads,
-        device=startdevice,
-        dtype=model.dtype,
-    )
-    past_key_values_data_list.append(past_key_values_data)
-    # Initialize tensor to store the current length of the cached data for all layers.
-    # [IMPORTANT] It needs to be kept on CPU for quick access and updates.
-    current_length_data = torch.zeros(
-        config.num_hidden_layers * 2, dtype=torch.long, device="cpu"
-    )
-    # Creating a KVCache for each pair of key and value in all layers
-    past_key_values = [] * config.num_hidden_layers
-
-    bias=0
-    start_data_m=devices[0].index
-    for i in range(config.num_hidden_layers):
-        data_m=devices[i].index
-        if data_m!=start_data_m:
-            bias=0
-            start_data_m=data_m
-        try:
-            past_key_values.append(
-                [
-                    KVCache(past_key_values_data_list[data_m-devices[0].index][2*bias + j], current_length_data[i * 2 + j])
-                    for j in range(2)
-                ]
-            )
-        except:
-            past_key_values.append(
-                [
-                    KVCache(past_key_values_data_list[0][2 * bias + j],
-                            current_length_data[i * 2 + j])
-                    for j in range(2)
-                ]
-            )
-        bias+=1
-    return past_key_values, past_key_values_data_list, current_length_data
-
-
-
