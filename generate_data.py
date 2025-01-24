@@ -7,7 +7,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 from tqdm import tqdm
 
-CONFIG_PATH = './configs/data_generate_config.json'
 
 
 def build_dataset_rank(tokenizer, ge_config, split="train", select=None):
@@ -63,7 +62,7 @@ def build_dataset_rank(tokenizer, ge_config, split="train", select=None):
                     conversation= tokenizer.apply_chat_template(
                         messages[:i+1],
                         tokenize=False,
-                        add_generation_prompt=False
+                        add_generation_prompt=True
                         )
                     input_ids = tokenizer(
                         conversation,
@@ -89,18 +88,6 @@ def build_dataset_rank(tokenizer, ge_config, split="train", select=None):
     ds1.set_format(type="torch")
     return ds1
 
-@torch.no_grad()
-def ge(data, model):
-    input_ids=data["input_ids"]
-    outs_big = model(input_ids.cuda(), output_hidden_states=True)
-    hidden_state_big = outs_big.hidden_states[-1]
-    probs = torch.softmax(outs_big.logits, dim=-1)
-    td={
-        "input_ids":input_ids.cpu()[0],
-        "hidden_state":hidden_state_big.cpu()[0],
-        # "loss_mask":data["loss_mask"].cpu()[0]
-        }
-    return td
 
 @torch.no_grad()
 def ge_jacobi(data, model, token_nums=100, do_sample=False, temperature=0.7):
@@ -155,26 +142,26 @@ def writedata(name,data_point):
     torch.save(data_point, f'{name}/data_{idx}.ckpt')
 
 
-def main():
-    with open(CONFIG_PATH, 'r') as f:
-        ge_config = json.loads(f.read())
+CONFIG_PATH = './configs/data_generate_config.json'
+with open(CONFIG_PATH, 'r') as f:
+    ge_config = json.loads(f.read())
 
-    out_dir = f'{ge_config["output_folder"]}/{ge_config["data_name"]}_{ge_config["model_name"]}'
+out_dir = f'{ge_config["output_folder"]}/{ge_config["data_name"]}_{ge_config["model_name"]}_{ge_config["name"]}'
 
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
+if not os.path.exists(out_dir):
+    os.makedirs(out_dir)
 
-    # generate data for inference
-    model_card = f"{ge_config["model_path"]}/{ge_config["model_name"]}"
+# generate data for inference
+model_card = f"{ge_config["model_path"]}/{ge_config["model_name"]}"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_card, use_fast=False)
-    dataset = build_dataset_rank(tokenizer, ge_config)
-    model = AutoModelForCausalLM.from_pretrained(model_card, device_map="auto", torch_dtype=torch.bfloat16)
-    model.eval()
+tokenizer = AutoTokenizer.from_pretrained(model_card, use_fast=False)
+dataset = build_dataset_rank(tokenizer, ge_config)
+model = AutoModelForCausalLM.from_pretrained(model_card, device_map="auto", torch_dtype=torch.bfloat16)
+model.eval()
 
-    for id, data in enumerate(tqdm(dataset)):
-        if data['input_ids'].shape[0] + ge_config["jacobi_tokens"] >= ge_config["max_len"]:
-            print(f"sample[{id}] has length {data['input_ids'].shape[0]}, which is too long for training, discard")
-            continue
-        outdata = ge_jacobi(data, model, ge_config["jacobi_tokens"], do_sample=True)
-        writedata(out_dir, outdata)
+for id, data in enumerate(tqdm(dataset)):
+    if data['input_ids'].shape[0] + ge_config["jacobi_tokens"] >= ge_config["max_len"]:
+        print(f"sample[{id}] has length {data['input_ids'].shape[0]}, which is too long for training, discard")
+        continue
+    outdata = ge_jacobi(data, model, ge_config["jacobi_tokens"], do_sample=True)
+    writedata(out_dir, outdata)
