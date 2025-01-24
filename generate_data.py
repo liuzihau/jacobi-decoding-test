@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 
 def build_dataset_rank(tokenizer, ge_config, split="train", select=None):
-    ds = load_dataset(f"{ge_config["data_path"]}/{ge_config["data_name"]}", data_files='ShareGPT_V3_unfiltered_cleaned_split.json')
+    ds = load_dataset(f"{ge_config['data_path']}/{ge_config['data_name']}", data_files='ShareGPT_V3_unfiltered_cleaned_split.json')
     ds = ds['train']
     ds = ds.shuffle(seed=42)
     ds1 = ds.select(range(ge_config["data_start"], ge_config["data_end"]))
@@ -152,7 +152,7 @@ if not os.path.exists(out_dir):
     os.makedirs(out_dir)
 
 # generate data for inference
-model_card = f"{ge_config["model_path"]}/{ge_config["model_name"]}"
+model_card = f"{ge_config['model_path']}/{ge_config['model_name']}"
 
 tokenizer = AutoTokenizer.from_pretrained(model_card, use_fast=False)
 dataset = build_dataset_rank(tokenizer, ge_config)
