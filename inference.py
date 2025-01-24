@@ -124,25 +124,41 @@ for batch_idx, data in enumerate(tqdm(test_loader)):
         res = tokenizer.decode(j[0].detach().cpu().tolist())
         print(f"Res: {res}")
 
+report = {
+    "jacobi_decoding_chances": total,
+    "naive_tokens": n_tokens,
+    "naive_time": n_time,
+    "jacobi_tokens": j_tokens,
+    "jacobi_time": j_time,
+    "jacobi_ar_tokens": ja_tokens,
+    "jacobi_ar_time": ja_time
+}
+
 print(total, correct)
 print(f"[token generated] naive: {n_tokens}, jacobi_ar: {ja_tokens}, jacobi: {j_tokens}")
 print(f"[final speed compare] naive: {n_tokens / n_time:.3f}(tokens/sec), jacobi_ar: {ja_tokens / ja_time:.3f}(tokens/sec), jacobi: {j_tokens / j_time:.3f}(tokens/sec)")
 
 keys = sorted(correct.keys(), key=lambda x: (len(x), x[0]))
-accept_rate = {}
+acceptance_rate = {}
 for key in keys:
     if len(key) == 1:
         token_name = key[0]
-        accept_rate[token_name] = {}
-        accept_rate[token_name]['accept_rate'] = correct[key] / total
+        acceptance_rate[token_name] = {}
+        acceptance_rate[token_name]['accept_rate'] = correct[key] / total
     elif len(key) == 2:
         token_name = key[0]
         sub_token_name = key[1]
-        accept_rate[token_name][sub_token_name] = correct[key] / correct[(key[0],)]
+        acceptance_rate[token_name][sub_token_name] = correct[key] / correct[(key[0],)]
 
+report["acceptance_rate"] = acceptance_rate
 with open(inference_config["reportpath"], "w") as f:
-    json.dump(accept_rate, f, indent=4)  # Use indent for pretty formatting
+    json.dump(report, f, indent=4)  # Use indent for pretty formatting
 
-for key in accept_rate:
-    print(key)
-    print(accept_rate[key])
+for key in report:
+    print(f"{key}")
+    if key == 'acceptance_rate':
+        for k in report[key]:
+            print(f"{k}:")
+            print(f"\t{report[key][k]}")
+    else:
+        print(f"\t{report[key]}")
