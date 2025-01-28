@@ -70,6 +70,43 @@ class CustomDataset(Dataset):
 
             attention_mask = [1] * input_ids.shape[0]
 
+        elif True:
+            # ================================================================================================ the same
+            possible_sets = (self.max_len - input_nums - self.jacobi_tokens) // (self.jacobi_tokens+1) + 1
+            start_limitation = generated_nums - self.jacobi_tokens - 2
+            if possible_sets > start_limitation:
+                start, end = 0, start_limitation
+            else:
+                start = 0  # random.randint(0, start_limitation-possible_sets)
+                end = start + possible_sets
+
+            input_ids_target = generated_tokens[start+1:end+self.jacobi_tokens+1].unfold(0, self.jacobi_tokens, 1).reshape(-1)
+            
+            hidden_states = hidden_states[start+1:end+self.jacobi_tokens+1].unfold(0, self.jacobi_tokens, 1)
+            hidden_states = torch.permute(hidden_states, (0, 2, 1))
+            hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+            # ================================================================================================
+            print(input_ids.shape)
+            print(generated_tokens.shape)
+            input_ids = torch.cat([input_ids, generated_tokens[:start]],dim=-1) if start > 0 else input_ids
+            print(input_ids.shape)
+            generated_tokens = generated_tokens[start:end]
+            print(generated_tokens.shape)
+            padding_tensors = torch.ones((self.jacobi_tokens * (generated_tokens.shape[0] + 1),), dtype=generated_tokens.dtype) * self.fake_id
+            # padding_tensors = torch.cat([padding_tensor] * generated_tokens.shape[0], dim=0)
+            print(padding_tensors.shape)
+            # merged_tokens = torch.cat([generated_tokens[:, None], padding_tensors], dim=-1).flatten()  #[token1, 0, 0, token2, 0, 0, ...]
+            input_ids = torch.cat([input_ids, generated_tokens, padding_tensors])
+            print(input_ids.shape)
+
+            jacobi_indices = torch.nonzero(input_ids == self.fake_id, as_tuple=True)
+            loss_mask = torch.zeros_like(input_ids)
+            input_ids[jacobi_indices] = self.pad
+            loss_mask[jacobi_indices] = 1
+            loss_mask = loss_mask.tolist()
+
+            attention_mask = [1] * input_ids.shape[0]
+
         else:
             start_limitation = generated_nums - self.jacobi_tokens - 2 
             start_index = 33  # random.randint(0, start_limitation)

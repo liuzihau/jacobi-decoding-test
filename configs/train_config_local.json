@@ -10,7 +10,7 @@
     "debug_mode": false,
     "use_multi_token_sets": true,
     "jacobi_token_nums": 2,
-    "mix_sequences": 1,
+    "mix_sequences": 2,
     "projection_frequency": 4,
     "adapter_type": "Qwen2MLP",
     "initialise_method": "kaiming",
@@ -19,6 +19,7 @@
         "clamp":false
     },
     "shared_adapter": false,
+    "layer_norm": true,
     "shared_jacobi_token": true,
     "train_data_portion": 0.95,
     "test_data_portion": 0.95,
