@@ -18,24 +18,7 @@ from transformers.utils import ModelOutput
 
 from models.qwen2.modeling_qwen2 import Qwen2PreTrainedModel, Qwen2Model, Qwen2RMSNorm
 from tools.tree_structure import TreeStructure, InputProcessor
-
-PERFORMANCE_CHECK = True
-
-class Timer:
-    def __init__(self):
-        self.report = {}
-
-    def record_time(self, func, **kwargs):
-        s = time.time()
-        res = func(kwargs)
-        delta = time.time() - s
-        key = func.__name__
-        if key in self.report:
-            self.report[key] += delta
-        else:
-            self.report[key] = delta
-        return res
-
+from tools.utils import PERFORMANCE_CHECK, timer
 
 @dataclass
 class JacobiCausalLMOutputWithPast(ModelOutput):
@@ -110,9 +93,10 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     
-    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4, adapter_type='Linear', shared_adapter=True, shared_jacobi_token=True, jacobi_adapter_kwargs=None, layer_norm=False, decoding_mode="jacobi"):
+    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4, adapter_type='Linear', shared_adapter=True, shared_jacobi_token=True, jacobi_adapter_kwargs=None, layer_norm=False, token_sets_inline=True, decoding_mode="jacobi"):
         super().__init__(config)
         self.confg = config
+        self.token_sets_inline = token_sets_inline
         self.model = Qwen2Model(config)
         self.vocab_size = config.vocab_size
         self.mix_sequences = mix_sequences
@@ -144,7 +128,6 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         else:
             adapter_layers = attn_layers // self.proj_freq
         jacobi_adapter_kwargs = {} if jacobi_adapter_kwargs is None else jacobi_adapter_kwargs        
-        # self.adapters = nn.ModuleList([adapter_module((n+2)*attn_hidden_size, attn_hidden_size, layers=adapter_layers, **jacobi_adapter_kwargs) for n in range(mix_sequences)])
         return adapter_module((self.mix_sequences+1)*attn_hidden_size, attn_hidden_size, layers=adapter_layers, **jacobi_adapter_kwargs)
 
     def init_jacobi_token(self, attn_hidden_size):
@@ -201,30 +184,161 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 modified_embeds[i].scatter_(0, replace_indices.unsqueeze(-1).expand(-1, self.jacobi_weight.shape[-1]), expand_weight)
 
             return modified_embeds
+        
+    def cat_tokens_inline_lagacy(self, hidden_states, loss_mask, adapter_idx):
+        for i in range(hidden_states.shape[0]):
+            replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]  #[6, 7, 9, 10, 12, 13]
+            replace_indices_groups = replace_indices.view(-1, self.jacobi_token_nums)  # [[6, 7], [9, 10], [12, 13]]
+            prev_seq_indices_groups = (replace_indices_groups[:, 0] - self.mix_sequences).reshape(-1, 1)  #[[5], [8], [11]]
+            all_indices = torch.cat([prev_seq_indices_groups, replace_indices_groups], dim=-1)  #[[5, 6, 7], [8, 9, 10], [11, 12, 13]]
+            target_states.append(hidden_states[i, all_indices])  # [groups, jacobi_token_nums + mix_seq, hidden_dim]
+        target_states = torch.cat(target_states, dim=0)  # [mix groups from all bs, jacobi_token_nums + mix_seq, hidden_dim]
+        
+        curr_states = target_states[:, -self.jacobi_token_nums:, :]  # [mix groups from all bs, jacobi_token_nums, hidden_dim]
+        new_states = None
+        for i in range(self.mix_sequences):
+            prev_states = target_states[:, -(self.jacobi_token_nums+i+1):-(i+1), :]
+            curr_states = torch.cat([curr_states, prev_states], dim=-1)
+            if self.layer_norm:
+                curr_states = self.pre_adapter_layernorm(curr_states)
+            if new_states is None:
+                new_states = self.adapters(curr_states, adapter_idx)
+            else:
+                new_states += self.adapters(curr_states, adapter_idx)
+        new_states /= self.mix_sequences
+        return new_states
 
-    def forward_backbone_decoder_layer(self, decoder_layer, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings):
+    def cat_tokens_inline(self, hidden_states, loss_mask):
+        target_states = []
+        for i in range(hidden_states.shape[0]):
+            replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]  #[6, 7, 9, 10, 12, 13]
+            replace_indices_groups = replace_indices.view(-1, self.jacobi_token_nums)  # [[6, 7], [9, 10], [12, 13]]
+            first_replace_indice_group = replace_indices_groups[0]
+            normal_replace_indice_groups = replace_indices_groups[1:]
+            first_prev_seq_indices_groups = torch.cat([first_replace_indice_group[[0]] - i for i in range(self.mix_sequences, 0, -1)], dim=-1).view(-1, self.mix_sequences)
+            start_indices = (normal_replace_indice_groups[:, 0] - 1 - (self.jacobi_token_nums+1) * (self.mix_sequences - 1)).view(-1, 1)
+            normal_prev_seq_indices_groups = torch.cat([start_indices + i * (self.jacobi_token_nums + 1) for i in range(self.mix_sequences)], dim=-1)
+            prev_seq_indices_groups = torch.cat([first_prev_seq_indices_groups, normal_prev_seq_indices_groups], dim=0)
+            all_indices = torch.cat([prev_seq_indices_groups, replace_indices_groups], dim=-1)  #[[5, 6, 7], [8, 9, 10], [11, 12, 13]]
+            target_states.append(hidden_states[i, all_indices])  # [groups, jacobi_token_nums + mix_seq, hidden_dim]
+        target_states = torch.cat(target_states, dim=0)
+        curr_states = torch.cat([target_states[:, -(self.jacobi_token_nums + i):-i if i > 0 else None, :] for i in range(self.mix_sequences + 1)], dim=-1)
+        return curr_states
+    
+    def cat_tokens_with_index(self, hidden_states, cat_indices):
+        curr_states = []
+        for i in range(cat_indices.shape[0]):
+            all_related_hidden_states = hidden_states[i, cat_indices[i]]
+            sets, mix, hidden_dims = all_related_hidden_states.shape
+            concatenate_hidden_states = all_related_hidden_states.view(sets, mix*hidden_dims)
+            group_hidden_states = concatenate_hidden_states.view(-1, self.jacobi_token_nums, mix*hidden_dims)
+            curr_states.append(group_hidden_states)
+        return torch.cat(curr_states, dim=0)
+    
+    
+    def cat_tokens_split(self, hidden_states, loss_mask):
+        target_states = []
+        for i in range(hidden_states.shape[0]):
+            replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]  #[30, 31, 32, 33, 34, 35]
+            replace_indices_groups = replace_indices.view(-1, self.jacobi_token_nums)  # [[30, 31], [32, 33], [34, 35]]
+            group_counts = replace_indices_groups.shape[0]
+            reference_array = torch.arange(replace_indices[0], replace_indices[0]+group_counts).view(-1, 1)
+            end = group_counts - 1
+            start = end + self.mix_sequences
+            mix_array = torch.arange(start, end, step=-1).view(1, -1)
+            prev_seq_indices_groups = (reference_array - mix_array).to(replace_indices_groups.device)  #  [[26, 27], [27, 28], [28, 29]]
+            all_indices = torch.cat([prev_seq_indices_groups, replace_indices_groups], dim=-1)  #[[26, 27, 30, 31], [27, 28, 32, 33], [28, 29, 34, 35]]
+            target_states.append(hidden_states[i, all_indices])  # [groups, jacobi_token_nums + mix_seq, hidden_dim]
+
+        target_states = torch.cat(target_states, dim=0)  # [mix groups from all bs, jacobi_token_nums + mix_seq, hidden_dim]
+        curr_states = torch.cat([target_states[:, -(self.jacobi_token_nums + i):-i if i > 0 else None, :] for i in range(self.mix_sequences + 1)], dim=-1)
+        return curr_states
+
+    def handle_attention_mask(self, bs, target_length, attention_mask, past_seen_tokens, loss_mask, device, dtype):
+        # device, dtype = hidden_states.device, hidden_states.dtype
+        min_dtype = torch.finfo(dtype).min
+        is_4d_mask = attention_mask is not None and len(attention_mask.shape) == 4
+        if is_4d_mask:
+            previous_mask = torch.zeros((attention_mask.shape[0], attention_mask.shape[1], attention_mask.shape[2], past_seen_tokens), dtype=dtype, device=device)
+            causal_mask = torch.cat([previous_mask, attention_mask], dim=-1).type(dtype)
+        else:
+            # target_length = hidden_states.shape[1]
+            deny_mask = torch.full((target_length, target_length), fill_value=min_dtype, dtype=dtype, device=device)
+            causal_mask = []
+            # for batch_idx in range(hidden_states.shape[0]):
+            for batch_idx in range(bs):
+                diagonal_attend_mask = torch.arange(target_length, device=device, dtype=torch.int32)
+                diagonal_attend_mask = diagonal_attend_mask > diagonal_attend_mask.reshape(-1, 1)
+
+                replace_indices_groups = torch.nonzero(loss_mask[batch_idx] == 1, as_tuple=True)[0].view(-1, self.jacobi_token_nums)
+                curr_loss_mask = loss_mask[batch_idx].repeat(diagonal_attend_mask.shape[-1], 1)
+                for i in replace_indices_groups:
+                    curr_loss_mask[i[0]:i[-1]+1, i[0]:i[-1]+1] = 0
+                diagonal_attend_mask.bitwise_or_(curr_loss_mask.type(torch.bool))
+                final_mask = deny_mask * diagonal_attend_mask
+                causal_mask.append(final_mask.unsqueeze(0))
+            causal_mask = torch.stack(causal_mask, dim=0)
+        return causal_mask
+
+    def update_hidden_states(self, hidden_states, new_states, loss_mask, jacobi_indices=None):
+        pointer = 0
+        for i in range(hidden_states.shape[0]):
+            if jacobi_indices is not None:
+                replace_indices = jacobi_indices[i]
+            else:
+                replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
+            group = replace_indices.shape[0] // self.jacobi_token_nums
+            bs_new_states = new_states[pointer:pointer+group]
+            hidden_states[i, replace_indices] = bs_new_states.view(-1, hidden_states.shape[-1])
+            
+            pointer += group
+            
+    def forward_backbone_decoder_layer(self, decoder_layer, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings, jacobi_indices, cat_indices):
         residual = hidden_states
-
-        hidden_states = decoder_layer.input_layernorm(hidden_states)
-
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = decoder_layer.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=causal_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_values,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            position_embeddings=position_embeddings,
-            jacobi_tokens=self.jacobi_token_nums
-        )
+        if PERFORMANCE_CHECK:
+            kwargs = {"hidden_states":hidden_states}
+            hidden_states = timer.record_time("layernorm", decoder_layer.input_layernorm, **kwargs)
+            kwargs = {
+                "hidden_states":hidden_states,
+                "attention_mask":causal_mask,
+                "position_ids":position_ids,
+                "past_key_value":past_key_values,
+                "output_attentions":output_attentions,
+                "use_cache":use_cache,
+                "cache_position":cache_position,
+                "position_embeddings":position_embeddings,
+                "jacobi_tokens":self.jacobi_token_nums
+            }
+            hidden_states, self_attn_weights, present_key_value = timer.record_time("attn", decoder_layer.self_attn, **kwargs)
+        else:
+            hidden_states = decoder_layer.input_layernorm(hidden_states)
+            hidden_states, self_attn_weights, present_key_value = decoder_layer.self_attn(
+                hidden_states=hidden_states,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                jacobi_tokens=self.jacobi_token_nums
+            )
+
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = decoder_layer.post_attention_layernorm(hidden_states)
-        hidden_states = decoder_layer.mlp(hidden_states)
+        
+        if PERFORMANCE_CHECK:
+            kwargs = {"hidden_states":hidden_states}
+            hidden_states = timer.record_time("layernorm", decoder_layer.post_attention_layernorm, **kwargs)
+            kwargs = {"hidden_state":hidden_states}
+            hidden_states = timer.record_time("mlp", decoder_layer.mlp, **kwargs)
+        else:
+            hidden_states = decoder_layer.post_attention_layernorm(hidden_states)
+            hidden_states = decoder_layer.mlp(hidden_states)
+        
         hidden_states = residual + hidden_states
         
         # previous token projection
@@ -235,54 +349,57 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             else:
                 adapter_idx = layer_idx // self.proj_freq
 
-            target_states = []
-            print(causal_mask[0, 0, 0, :10])
-            print(causal_mask.shape)
-            print(loss_mask[:, None, :].shape)
-            a = (causal_mask/causal_mask.min() + loss_mask[:, None, :])
-            print(torch.sort(a.argsort(dim=-1), dim=-1)[0][0, 0, -10:, -2:])
-            # print(torch.nonzero(a[0, 0, 900] == 0, as_tuple=True))
-            return
-            for i in range(hidden_states.shape[0]):
-                replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]  #[6, 7, 9, 10, 12, 13]
-                replace_indices_groups = replace_indices.view(-1, self.jacobi_token_nums)  # [[6, 7], [9, 10], [12, 13]]
-                # prev_seq_indices_groups = (replace_indices_groups[:, 0] - self.mix_sequences).reshape(-1, 1)  #[[5], [8], [11]]
-                # all_indices = torch.cat([prev_seq_indices_groups, replace_indices_groups], dim=-1)  #[[5, 6, 7], [8, 9, 10], [11, 12, 13]]
-                
-                first_replace_indice_group = replace_indices_groups[0]
-                normal_replace_indice_groups = replace_indices_groups[1:]
-                first_prev_seq_indices_groups = torch.cat([first_replace_indice_group[[0]] - i for i in range(self.mix_sequences, 0, -1)], dim=-1).view(-1, self.mix_sequences)
-                start_indices = (normal_replace_indice_groups[:, 0] - 1 - (self.jacobi_token_nums+1) * (self.mix_sequences - 1)).view(-1, 1)
-                normal_prev_seq_indices_groups = torch.cat([start_indices + i * (self.jacobi_token_nums + 1) for i in range(self.mix_sequences)], dim=-1)
-                prev_seq_indices_groups = torch.cat([first_prev_seq_indices_groups, normal_prev_seq_indices_groups], dim=0)
-                all_indices = torch.cat([prev_seq_indices_groups, replace_indices_groups], dim=-1)  #[[5, 6, 7], [8, 9, 10], [11, 12, 13]]
-                target_states.append(hidden_states[i, all_indices])  # [groups, jacobi_token_nums + mix_seq, hidden_dim]
-            target_states = torch.cat(target_states, dim=0)  # [mix groups from all bs, jacobi_token_nums + mix_seq, hidden_dim]
-            
-            # curr_states = target_states[:, -self.jacobi_token_nums:, :]  # [mix groups from all bs, jacobi_token_nums, hidden_dim]
-            # new_states = None
-            # for i in range(self.mix_sequences):
-            #     prev_states = target_states[:, -(self.jacobi_token_nums+i+1):-(i+1), :]
-            #     curr_states = torch.cat([curr_states, prev_states], dim=-1)
-            #     if self.layer_norm:
-            #         curr_states = self.pre_adapter_layernorm(curr_states)
-            #     if new_states is None:
-            #         new_states = self.adapters[i](curr_states, adapter_idx)
-            #     else:
-            #         new_states += self.adapters[i](curr_states, adapter_idx)
-            # new_states /= self.mix_sequences
-            curr_states = torch.cat([target_states[:, -(self.jacobi_token_nums + i):-i if i > 0 else None, :] for i in range(self.mix_sequences + 1)], dim=-1)
-            if self.layer_norm:
-                curr_states = self.pre_adapter_layernorm(curr_states)            
-            new_states = self.adapters(curr_states, adapter_idx)
+            if cat_indices is not None:
+                if PERFORMANCE_CHECK:
+                    kwargs = {
+                        "hidden_states":hidden_states,
+                        "cat_indices":cat_indices
+                        }
+                    curr_states = timer.record_time("cat_tokens", self.cat_tokens_with_index, **kwargs)
+                else:
+                    curr_states = self.cat_tokens_with_index(hidden_states, cat_indices)
 
-            pointer = 0
-            for i in range(hidden_states.shape[0]):
-                replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
-                group = replace_indices.shape[0] // self.jacobi_token_nums
-                bs_new_states = new_states[pointer:pointer+group]
-                hidden_states[i, replace_indices] = bs_new_states.reshape(-1, hidden_states.shape[-1])
-                pointer += group
+            else:
+                if self.token_sets_inline:
+                    if self.mix_sequences != 1:
+                        raise NotImplementedError(f"current only support concatenate wit previous token, but receive mix_sequence = {self.mix_sequences}")
+                    # new_states = self.cat_tokens_inline_lagacy(hidden_states, loss_mask, adapter_idx)
+
+                    if PERFORMANCE_CHECK:
+                        kwargs = {
+                        "hidden_states":hidden_states,
+                        "loss_mask":loss_mask
+                        }
+                        curr_states = timer.record_time("cat_tokens", self.cat_tokens_inline, **kwargs)
+                    else:
+                        curr_states = self.cat_tokens_inline(hidden_states, loss_mask)
+
+                else:
+                    curr_states = self.cat_tokens_split(hidden_states, loss_mask)
+            
+            if self.layer_norm:
+                curr_states = self.pre_adapter_layernorm(curr_states)
+
+            # print(curr_states.shape, curr_states.dtype)
+            if PERFORMANCE_CHECK:
+                kwargs = {
+                    "hidden_state":curr_states,
+                    "idx":adapter_idx
+                }
+                new_states = timer.record_time("adapters", self.adapters, **kwargs)
+            else:
+                new_states = self.adapters(curr_states, adapter_idx)
+
+            if PERFORMANCE_CHECK:
+                kwargs = {
+                    "hidden_states":hidden_states,
+                    "new_states":new_states,
+                    "loss_mask":loss_mask,
+                    "jacobi_indices":jacobi_indices
+                }
+                timer.record_time("update_hidden_states", self.update_hidden_states, **kwargs)
+            else:
+                self.update_hidden_states(hidden_states, new_states, loss_mask, jacobi_indices)
 
         outputs = (hidden_states,)
         if output_attentions:
@@ -293,7 +410,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         return outputs
 
-    def forward_backbone_decoder_layers(self, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings, output_hidden_states):
+    def forward_backbone_decoder_layers(self, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings, output_hidden_states, jacobi_indices, cat_indices):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
@@ -301,6 +418,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         for decoder_layer in self.model.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
+
             layer_outputs = self.forward_backbone_decoder_layer(
                 decoder_layer=decoder_layer,
                 hidden_states=hidden_states,
@@ -311,7 +429,9 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
-                position_embeddings=position_embeddings)
+                position_embeddings=position_embeddings,
+                jacobi_indices = jacobi_indices,
+                cat_indices = cat_indices)
 
             hidden_states = layer_outputs[0]
 
@@ -342,6 +462,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        jacobi_indices: Optional[torch.Tensor] = None,
+        cat_indices: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
         (output_attentions, 
@@ -359,7 +481,14 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         inputs_embeds = self.model.embedding(input_ids=input_ids, inputs_embeds=inputs_embeds)
 
         # insert jacobi tokens
-        inputs_embeds = self.merge_jacobi_tokens(inputs_embeds, loss_mask)
+        if PERFORMANCE_CHECK:
+            kwargs = {
+                "inputs_embeds":inputs_embeds,
+                "loss_mask":loss_mask
+                }
+            inputs_embeds = timer.record_time("merge_jacobi_tokens", self.merge_jacobi_tokens, **kwargs)
+        else:
+            inputs_embeds = self.merge_jacobi_tokens(inputs_embeds, loss_mask)
 
         # if model is training -> don't allow cache_position
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -382,50 +511,25 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         cache_position = cache_position + past_seen_tokens
         position_ids = cache_position
 
-        # if cache_position is None:
-        #     past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-        #     cache_position = torch.arange(past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device)
-        # else:
-        #     last_cache_num = cache_position[-1].item()
-        #     jacobi_position = torch.arange(last_cache_num+1, last_cache_num + self.jacobi_token_nums + 1, device=inputs_embeds.device)
-        #     cache_position = torch.cat([cache_position, jacobi_position], dim=-1)
-
-        # if position_ids is None:
-        # position_ids = cache_position.unsqueeze(0)
-        # position_ids = cache_position
-
         hidden_states = inputs_embeds
         
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.model.rotary_emb(hidden_states, position_ids)
         
-        # causal_mask = self.model._update_causal_mask(attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions)
-        device, dtype = hidden_states.device, hidden_states.dtype
-        min_dtype = torch.finfo(dtype).min
-        is_4d_mask = len(attention_mask.shape) == 4
-        if attention_mask is not None and is_4d_mask:
-            previous_mask = torch.zeros((attention_mask.shape[0], attention_mask.shape[1], attention_mask.shape[2], past_seen_tokens), dtype=dtype, device=device)
-            causal_mask = torch.cat([previous_mask, attention_mask], dim=-1).type(dtype)
+        if PERFORMANCE_CHECK:
+            kwargs = {
+                "bs":hidden_states.shape[0], 
+                "target_length":hidden_states.shape[1], 
+                "attention_mask":attention_mask, 
+                "past_seen_tokens":past_seen_tokens, 
+                "loss_mask":loss_mask, 
+                "device":hidden_states.device, 
+                "dtype":hidden_states.dtype
+            }
+            causal_mask = timer.record_time("handle_attention_mask", self.handle_attention_mask, **kwargs)
         else:
-            target_length = hidden_states.shape[1]
-            deny_mask = torch.full((target_length, target_length), fill_value=min_dtype, dtype=dtype, device=device)
-            causal_mask = []
-            for batch_idx in range(hidden_states.shape[0]):
-                diagonal_attend_mask = torch.arange(target_length, device=device, dtype=torch.int32)
-                diagonal_attend_mask = diagonal_attend_mask > diagonal_attend_mask.reshape(-1, 1)
-
-                replace_indices_groups = torch.nonzero(loss_mask[batch_idx] == 1, as_tuple=True)[0].view(-1, self.jacobi_token_nums)
-                curr_loss_mask = loss_mask[batch_idx].repeat(diagonal_attend_mask.shape[-1], 1)
-                for i in replace_indices_groups:
-                    curr_loss_mask[i[0]:i[-1]+1, i[0]:i[-1]+1] = 0
-                diagonal_attend_mask.bitwise_or_(curr_loss_mask.type(torch.bool))
-                final_mask = deny_mask * diagonal_attend_mask
-                causal_mask.append(final_mask.unsqueeze(0))
-            causal_mask = torch.stack(causal_mask, dim=0)
-            # print(causal_mask.shape, causal_mask.dtype, causal_mask.device)
-
-        # print(causal_mask.shape)
-
+            causal_mask = self.handle_attention_mask(hidden_states.shape[0], hidden_states.shape[1], attention_mask, past_seen_tokens, loss_mask, hidden_states.device, hidden_states.dtype)
+        
         # decoder layers with jacobi tokens
         hidden_states, all_hidden_states, next_decoder_cache, all_self_attns = self.forward_backbone_decoder_layers(hidden_states=hidden_states, 
                                                                                                                           causal_mask=causal_mask,
@@ -436,7 +540,9 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                                                                                                                           use_cache=use_cache, 
                                                                                                                           cache_position=cache_position, 
                                                                                                                           position_embeddings=position_embeddings, 
-                                                                                                                          output_hidden_states=output_hidden_states)
+                                                                                                                          output_hidden_states=output_hidden_states,
+                                                                                                                          jacobi_indices = jacobi_indices,
+                                                                                                                          cat_indices = cat_indices)
         
         next_cache = next_decoder_cache if use_cache else None
         if return_legacy_cache:
@@ -468,6 +574,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        jacobi_indices: Optional[torch.Tensor] = None,
+        cat_indices: Optional[torch.Tensor] = None,
         num_logits_to_keep: int = 0,
         **loss_kwargs,
     ) -> Union[Tuple, JacobiCausalLMOutputWithPast]:
@@ -477,19 +585,22 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
         if self.decoding_mode == "jacobi":
+
             outputs = self.forward_backbone_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                loss_mask=loss_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-                cache_position=cache_position,
-                )
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    loss_mask=loss_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                    cache_position=cache_position,
+                    jacobi_indices = jacobi_indices,
+                    cat_indices = cat_indices
+                    )
             hidden_states = outputs[0]
             logits = self.lm_head(hidden_states)
 
@@ -533,17 +644,32 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             )
 
         elif self.decoding_mode == "naive":
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-                cache_position=cache_position,
+            if PERFORMANCE_CHECK:
+                kwargs = {
+                    "input_ids":input_ids,
+                    "attention_mask":attention_mask,
+                    "position_ids":position_ids,
+                    "past_key_values":past_key_values,
+                    "inputs_embeds":inputs_embeds,
+                    "use_cache":use_cache,
+                    "output_attentions":output_attentions,
+                    "output_hidden_states":output_hidden_states,
+                    "return_dict":return_dict,
+                    "cache_position":cache_position,
+                }
+                outputs = timer.record_time("model", self.model, **kwargs)
+            else:
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                    cache_position=cache_position,
                 )
             hidden_states = outputs[0]
             # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
@@ -582,7 +708,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             tokenizer=None
             ):
         
-        input_processor = InputProcessor(input_ids.dtype, torch.float32, input_ids.dtype, input_ids.device, self.jacobi_token_nums)
+        input_processor = InputProcessor(input_ids.dtype, torch.float32, input_ids.dtype, input_ids.device, self.jacobi_token_nums, self.mix_sequences)
         past_key_values = DynamicCache()
         tt = 0
         ct = {}
@@ -640,16 +766,25 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # loop start
         while current_decoded_tokens.shape[-1] < max_new_tokens:
             trees = []
-            input_ids, attention_mask, loss_mask, cache_position = [], [], [], []
+            input_ids, attention_mask, loss_mask, cache_position, jacobi_indices, cat_indices = [], [], [], [], [], []
 
-            i = 0  # only support batch == 1
             tree = TreeStructure(normal_token.detach().cpu().item())
-            for no in range(jacobi_token.shape[0]):
-                for node in tree.layers[-1]:
-                    for kth_token_idx in range(jacobi_token[no].shape[0]):
-                        # p = node.route_prob * jacobi_token_p[no, kth_token_idx].detach().cpu().item()
-                        tree.add_node(jacobi_token[no, kth_token_idx].detach().cpu().item(), jacobi_token_p[no, kth_token_idx].detach().cpu().item(), node, None)
-            ith_input_ids, ith_attention_mask, ith_loss_mask, ith_cache_position = input_processor.build_inputs(tree)
+            if PERFORMANCE_CHECK:
+                kwargs = {
+                    "jacobi_token": jacobi_token,
+                    "jacobi_token_p": jacobi_token_p
+                }
+                timer.record_time("build_tree", tree.build_tree, **kwargs)
+            else:
+                tree.build_tree(jacobi_token, jacobi_token_p)
+
+            if self.token_sets_inline:
+                if PERFORMANCE_CHECK:
+                    ith_input_ids, ith_attention_mask, ith_loss_mask, ith_cache_position, ith_jacobi_indices, ith_cat_indices = timer.record_time("build_input_inline", input_processor.build_inputs_inline_jacobi_token, **{"tree":tree})
+                else:
+                    ith_input_ids, ith_attention_mask, ith_loss_mask, ith_cache_position, ith_jacobi_indices, ith_cat_indices = input_processor.build_inputs_inline_jacobi_token(tree)
+            
+            
             # for k, layer in enumerate(tree.layers):
             #     for node in layer:
             #         parent = node.parent.val if node.parent is not None else None
@@ -658,12 +793,17 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             attention_mask.append(ith_attention_mask)
             loss_mask.append(ith_loss_mask)
             cache_position.append(ith_cache_position)
-            trees.append(tree)
+            jacobi_indices.append(ith_jacobi_indices)
+            cat_indices.append(ith_cat_indices)
             
+            trees.append(tree)
+
             input_ids = torch.stack(input_ids, dim=0)
             attention_mask = torch.stack(attention_mask, dim=0)
             loss_mask = torch.stack(loss_mask, dim=0)
             cache_position = torch.stack(cache_position, dim=0)
+            jacobi_indices = torch.stack(jacobi_indices, dim=0)
+            cat_indices = torch.stack(cat_indices, dim=0)
 
             # print(f"="*60 + f" {current_decoded_tokens.shape[0]} " + f"="*60)
             # for i in range(attention_mask[0, 0].shape[0]):
@@ -671,7 +811,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             # # print()
             # print(loss_mask[0].detach().cpu().tolist())
             # print(cache_position[0].detach().cpu().tolist())
-            
+
             output = self.forward(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -680,7 +820,9 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 use_cache=True,
                 cache_position=cache_position,
                 output_hidden_states=False,
-                return_dict=True
+                return_dict=True,
+                jacobi_indices = jacobi_indices,
+                cat_indices = cat_indices
                 )
             
             i = 0  # only support batch == 1
@@ -720,8 +862,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             normal_token = token_sampled[route_indices][-1]
             jacobi_index_start = route_indices[-1]+1
             jacobi_index_end = jacobi_index_start + self.jacobi_token_nums
-            jacobi_indices = torch.arange(jacobi_index_start, jacobi_index_end)
-            jacobi_token_dist = token_dist[jacobi_indices]
+            selected_jacobi_indices = torch.arange(jacobi_index_start, jacobi_index_end)
+            jacobi_token_dist = token_dist[selected_jacobi_indices]
             jacobi_token, jacobi_token_p = decoding_jacobi_token(jacobi_token_dist, temperature, top_p, top_k)
         return current_decoded_tokens[:max_new_tokens], tt, ct
 
@@ -737,7 +879,6 @@ def decoding_jacobi_token(jacobi_token_dist, temperature=0.0, top_p=0.0, top_k=0
     top = torch.topk(jacobi_token_dist, 3, dim=-1)
     topk_index, topk_p = top.indices, top.values
     return topk_index, topk_p
-
 
 def verify_final_route(inputs, outputs, tree, force_autoregressive=False, tokenizer=None):
     # print("="*100)

@@ -5,7 +5,7 @@
     "statepath": null,
     "datapath": "/content/drive/MyDrive/datasets/ShareGPT_Vicuna_unfiltered_Qwen2.5-0.5B-Instruct",
     "cpdir": "/content/drive/MyDrive/jacobi_test_weights",
-    "mixed_precision": "fp16",
+    "mixed_precision": "bf16",
     "pad_token_id": 151643,
     "debug_mode": false,
     "use_multi_token_sets": true,

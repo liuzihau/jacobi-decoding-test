@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from accelerate.utils import set_seed
 
 from tools.data_processing import InferenceDataset, list_files
-from tools.utils import load_jacobi_weight
+from tools.utils import load_jacobi_weight, timer
 from models.qwen2.modeling_qwen2_jacobi import Qwen2JacobiForCausalLM
 from models.qwen2.tokenization_qwen2_fast import Qwen2TokenizerFast
 
@@ -162,3 +162,5 @@ for key in report:
             print(f"\t{report[key][k]}")
     else:
         print(f"\t{report[key]}")
+
+# print(timer.report)

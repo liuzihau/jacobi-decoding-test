@@ -40,6 +40,13 @@ class TreeStructure:
             self.layers.append([])
         self.layers[level_idx].append(node)
 
+    def build_tree(self, jacobi_token, jacobi_token_p):
+        for no in range(jacobi_token.shape[0]):  # [jacobi nums, top_k]
+            for node in self.layers[-1]:
+                for kth_token_idx in range(jacobi_token[no].shape[0]):
+                    # p = node.route_prob * jacobi_token_p[no, kth_token_idx].detach().cpu().item()
+                    self.add_node(jacobi_token[no, kth_token_idx].detach().cpu().item(), jacobi_token_p[no, kth_token_idx].detach().cpu().item(), node, None)
+            
     def reset_index_dict(self):
         self.index_dict = {}
 
@@ -57,8 +64,9 @@ class TreeStructure:
         return s
 
 class InputProcessor:
-    def __init__(self, input_dtype, attention_dtype, loss_mask_dtype, device, jacobi_token_nums, jacobi_id=0):
+    def __init__(self, input_dtype, attention_dtype, loss_mask_dtype, device, jacobi_token_nums, mix_sequences, jacobi_id=0):
         self.jacobi_token_nums = jacobi_token_nums
+        self.mix_sequences = mix_sequences
         self.jacobi_id = jacobi_id
         self.input_dtype = input_dtype
         self.attention_dtype = attention_dtype
@@ -66,7 +74,64 @@ class InputProcessor:
         self.min_dtype = torch.finfo(self.attention_dtype).min
         self.device = device
 
-    def build_inputs(self, tree):
+    def build_inputs_inline_jacobi_token(self, tree):
+        length = len(tree) * (1+self.jacobi_token_nums)
+        deny_mask = torch.full((length, length), fill_value=self.min_dtype, dtype=self.attention_dtype, device=self.device)
+        attention_mask = torch.ones((length, length), dtype=self.attention_dtype, device=self.device)
+        diagonal_mask = torch.arange(1+self.jacobi_token_nums, dtype=self.attention_dtype, device=self.device)
+        diagonal_mask = diagonal_mask > diagonal_mask.reshape(-1, 1)
+        tree.reset_index_dict()
+        input_ids = []
+        jacobi_indices = []
+        cat_indices = []
+        loss_mask = []
+        index = 0
+        for layer in tree.layers:
+            for node in layer:
+                tree.index_dict[node] = index
+                node.update_route(index)
+
+                if node.parent is not None:
+                    current_mask = attention_mask[tree.index_dict[node.parent]]
+                else:
+                    current_mask = attention_mask[0]
+                input_ids += [node.val] + [self.jacobi_id] * self.jacobi_token_nums
+                loss_mask += [0] + [1] * self.jacobi_token_nums
+                attention_mask[index:index+1+self.jacobi_token_nums, :] = current_mask
+                attention_mask[index:index+1+self.jacobi_token_nums, index:index+1+self.jacobi_token_nums] = diagonal_mask
+                for j_no in range(self.jacobi_token_nums):
+                    index += 1
+
+                    x = self.mix_sequences
+                    token_no = j_no
+                    pointer, counter = 1, -1
+                    token_set = []
+                    while x >= 0:
+                        if token_no >= 0:
+                            token_set.append(node.route[-1] + token_no + 1)
+                            token_no -= 1
+                            x -= 1
+                        elif len(node.route) >= pointer:
+                            token_set.append(node.route[-pointer])
+                            pointer += 1
+                            x -= 1
+                        else:
+                            token_set.append(counter)
+                            counter -= 1
+                            x -= 1
+                        
+                    cat_indices.append(token_set)
+                    jacobi_indices.append(index)
+                index += 1
+        cache_position = ((attention_mask - 1)* -1).type(torch.int32).sum(dim=-1) - 1
+        attention_mask = (attention_mask * deny_mask).unsqueeze(0)
+        input_ids = torch.tensor(input_ids, dtype=self.input_dtype, device=self.device)
+        loss_mask = torch.tensor(loss_mask, dtype=self.loss_mask_dtype, device=self.device)
+        jacobi_indices = torch.tensor(jacobi_indices, dtype=self.input_dtype, device=self.device)
+        cat_indices = torch.tensor(cat_indices, dtype=self.input_dtype, device=self.device)
+        return input_ids, attention_mask, loss_mask, cache_position, jacobi_indices, cat_indices
+
+    def build_inputs_split_jacobi_token(self, tree):
         length = len(tree) * (1+self.jacobi_token_nums)
         deny_mask = torch.full((length, length), fill_value=self.min_dtype, dtype=self.attention_dtype, device=self.device)
         attention_mask = torch.ones((length, length), dtype=self.attention_dtype, device=self.device)
@@ -96,7 +161,6 @@ class InputProcessor:
         input_ids = torch.tensor(input_ids, dtype=self.input_dtype, device=self.device)
         loss_mask = torch.tensor(loss_mask, dtype=self.loss_mask_dtype, device=self.device)
         return input_ids, attention_mask, loss_mask, cache_position
-
 
 def test_tree_structure():
     # Initialize Tree

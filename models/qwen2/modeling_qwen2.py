@@ -55,6 +55,7 @@ from models.qwen2.configuration_qwen2 import Qwen2Config
 if is_flash_attn_2_available():
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
 
+from tools.utils import PERFORMANCE_CHECK, timer
 
 logger = logging.get_logger(__name__)
 
@@ -911,16 +912,29 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     position_embeddings,
                 )
             else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=causal_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                    position_embeddings=position_embeddings,
-                )
+                if PERFORMANCE_CHECK:
+                    kwargs = {
+                        "hidden_states":hidden_states,
+                        "attention_mask":causal_mask,
+                        "position_ids":position_ids,
+                        "past_key_value":past_key_values,
+                        "output_attentions":output_attentions,
+                        "use_cache":use_cache,
+                        "cache_position":cache_position,
+                        "position_embeddings":position_embeddings,
+                    }
+                    layer_outputs = timer.record_time("original_decoder_layer", decoder_layer, **kwargs)
+                else:
+                    layer_outputs = decoder_layer(
+                        hidden_states,
+                        attention_mask=causal_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_values,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        position_embeddings=position_embeddings,
+                    )
 
             hidden_states = layer_outputs[0]
 

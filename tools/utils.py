@@ -1,5 +1,27 @@
+import time
 import torch
 from safetensors import safe_open
+
+PERFORMANCE_CHECK = False
+
+class Timer:
+    def __init__(self):
+        self.report = {}
+
+    def record_time(self, key, func, **kwargs):
+        s = time.time()
+        res = func(**kwargs)
+        delta = time.time() - s
+        if key in self.report:
+            self.report[key]["time"] += delta
+            self.report[key]["count"] += 1
+        else:
+            self.report[key] = {}
+            self.report[key]["time"] = delta
+            self.report[key]["count"] = 1        
+        return res
+
+timer = Timer()
 
 
 def top_accuracy(output, target, jacobi_token_nums, topk=(1,)):
@@ -35,7 +57,7 @@ def output_abnormal_message(target_p, output_logp, jacobi_hidden_states, target_
 
 def load_jacobi_weight(model, cpdir):
     with safe_open(cpdir, framework="pt") as f:
-        keys = f.keys()        
+        keys = f.keys()
         for name, param in model.named_parameters():
             all_set = True
             if "model." in name:
