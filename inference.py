@@ -164,3 +164,4 @@ for key in report:
         print(f"\t{report[key]}")
 
 # print(timer.report)
+# print(n_time, ja_time)

@@ -1,5 +1,0 @@
-[token generated] naive: 757, jacobi_ar: 766, jacobi: 767
-[final speed compare] naive: 64.181(tokens/sec), jacobi_ar: 47.408(tokens/sec), jacobi: 109.982(tokens/sec)
-
-[token generated] naive: 756, jacobi_ar: 756, jacobi: 758
-[final speed compare] naive: 66.178(tokens/sec), jacobi_ar: 41.547(tokens/sec), jacobi: 94.183(tokens/sec)

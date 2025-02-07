@@ -585,50 +585,70 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
         if self.decoding_mode == "jacobi":
-
-            outputs = self.forward_backbone_model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    loss_mask=loss_mask,
-                    position_ids=position_ids,
-                    past_key_values=past_key_values,
-                    inputs_embeds=inputs_embeds,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
-                    cache_position=cache_position,
-                    jacobi_indices = jacobi_indices,
-                    cat_indices = cat_indices
-                    )
+            if PERFORMANCE_CHECK:
+                kwargs = {
+                    "input_ids":input_ids,
+                    "attention_mask":attention_mask,
+                    "loss_mask":loss_mask,
+                    "position_ids":position_ids,
+                    "past_key_values":past_key_values,
+                    "inputs_embeds":inputs_embeds,
+                    "use_cache":use_cache,
+                    "output_attentions":output_attentions,
+                    "output_hidden_states":output_hidden_states,
+                    "return_dict":return_dict,
+                    "cache_position":cache_position,
+                    "jacobi_indices":jacobi_indices,
+                    "cat_indices":cat_indices
+                }
+                outputs = timer.record_time("backbone_model", self.forward_backbone_model, **kwargs)
+            else:
+                outputs = self.forward_backbone_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        loss_mask=loss_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        inputs_embeds=inputs_embeds,
+                        use_cache=use_cache,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                        return_dict=return_dict,
+                        cache_position=cache_position,
+                        jacobi_indices=jacobi_indices,
+                        cat_indices=cat_indices
+                        )
             hidden_states = outputs[0]
-            logits = self.lm_head(hidden_states)
+            logits = self.lm_head(hidden_states)  # cheap
 
             # self.wtf2 = torch.cat([self.wtf2, logits[:, 0, :].argmax(dim=-1)], dim=-1) if hasattr(self, "wtf2") else logits[:, -3, :].argmax(dim=-1)
 
-            if output_hidden_states:
-                all_hidden_states = outputs["hidden_states"]
-                jacobi_all_hidden_states = []
-        
-            # Iterate through the batch dimension
-            jacobi_hidden_states, jacobi_logits = [], []
-
             # max_sequence = 0
-            for i in range(hidden_states.shape[0]):
-                replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
-                jacobi_hidden_states.append(hidden_states[i, replace_indices, :])
-                jacobi_logits.append(logits[i, replace_indices, :])
-                
+            jacobi_logits, jacobi_hidden_states, jacobi_all_hidden_states = None, None, None
+            if self.training:
                 if output_hidden_states:
-                    temp = []
-                    for mid_hidden_state in all_hidden_states:
-                        temp.append(mid_hidden_state[i, replace_indices, :])
-                    jacobi_all_hidden_states.append(torch.stack(temp, dim=0))  # (layers, seq, hidden)
+                    all_hidden_states = outputs["hidden_states"]
+                    jacobi_all_hidden_states = []
+        
+                # Iterate through the batch dimension
+                jacobi_hidden_states, jacobi_logits = [], []
 
-            jacobi_hidden_states = torch.cat(jacobi_hidden_states, dim=0)
-            jacobi_logits = torch.cat(jacobi_logits, dim=0)
-            if output_hidden_states:
-                jacobi_all_hidden_states = torch.cat(jacobi_all_hidden_states, dim=1)  # (layers, seqs, hidden) ~= 24, 194, 896
+                for i in range(hidden_states.shape[0]):
+                    replace_indices = torch.nonzero(loss_mask[i] == 1, as_tuple=True)[0]
+                    jacobi_hidden_states.append(hidden_states[i, replace_indices, :])
+                    jacobi_logits.append(logits[i, replace_indices, :])
+                    
+                    if output_hidden_states:
+                        temp = []
+                        for mid_hidden_state in all_hidden_states:
+                            temp.append(mid_hidden_state[i, replace_indices, :])
+                        jacobi_all_hidden_states.append(torch.stack(temp, dim=0))  # (layers, seq, hidden)
+
+                jacobi_hidden_states = torch.cat(jacobi_hidden_states, dim=0)
+                jacobi_logits = torch.cat(jacobi_logits, dim=0)
+        
+                if output_hidden_states:
+                    jacobi_all_hidden_states = torch.cat(jacobi_all_hidden_states, dim=1)  # (layers, seqs, hidden) ~= 24, 194, 896
 
             if not return_dict:
                 output = (logits,) + outputs[1:]
@@ -673,7 +693,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 )
             hidden_states = outputs[0]
             # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])  #cheap
 
             self.wtf = torch.cat([self.wtf, logits.argmax(dim=-1)], dim=-1) if hasattr(self, "wtf") else logits.argmax(dim=-1)
             
@@ -831,7 +851,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             token_dist = nn.Softmax(dim=-1)(output["logits"][i])
             token_sampled = decoding_normal_token(token_dist, temperature, top_p, top_k)
             
-            # verify
+            # verify (cheap)
             route_indices, ans_list = verify_final_route(input_ids[i], token_sampled, trees[i], force_autoregressive, tokenizer)
             tt += 1
             for i in range(len(ans_list)):
@@ -847,15 +867,10 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
             # print(current_decoded_tokens)
             # handle cache
-            prev_cache = torch.arange(0, past_seen_tokens)
-            curr_cache = torch.tensor(route_indices) + past_seen_tokens
-            # print(prev_cache)
-            # print(curr_cache)
-            cache_indices = torch.cat([prev_cache, curr_cache], dim=-1)
-            for layer_idx in range(len(output["past_key_values"].key_cache)):
-                output["past_key_values"].key_cache[layer_idx] = output["past_key_values"].key_cache[layer_idx][:, :, cache_indices, :]
-                output["past_key_values"].value_cache[layer_idx] = output["past_key_values"].value_cache[layer_idx][:, :, cache_indices, :]
-                # print(output["past_key_values"].value_cache[layer_idx].shape)
+            if PERFORMANCE_CHECK:
+                timer.record_time("update_kv_cache", update_kv_cache, **{"output":output, "route_indices":route_indices, "past_seen_tokens":past_seen_tokens})
+            else:
+                update_kv_cache(output, route_indices, past_seen_tokens)
             past_seen_tokens = output["past_key_values"].get_seq_length()
             
             # prepare next input
@@ -867,6 +882,20 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             jacobi_token, jacobi_token_p = decoding_jacobi_token(jacobi_token_dist, temperature, top_p, top_k)
         return current_decoded_tokens[:max_new_tokens], tt, ct
 
+def update_kv_cache(output, route_indices, past_seen_tokens):
+    device = output["past_key_values"].key_cache[0].device
+    route_indices_tensor = torch.tensor(route_indices, device=device)
+
+    # Efficiently create cache indices
+    cache_indices = torch.cat([torch.arange(0, past_seen_tokens, device=device), route_indices_tensor + past_seen_tokens], dim=-1)
+
+    for layer_idx in range(len(output["past_key_values"].key_cache)):
+            key_cache = output["past_key_values"].key_cache[layer_idx]
+            value_cache = output["past_key_values"].value_cache[layer_idx]
+
+            # Use `index_select` for faster tensor slicing
+            output["past_key_values"].key_cache[layer_idx] = key_cache.index_select(2, cache_indices)
+            output["past_key_values"].value_cache[layer_idx] = value_cache.index_select(2, cache_indices)
 
 def decoding_normal_token(normal_token_dist, temperature=0.0, top_p=0.0, top_k=0.0):
     # greedy
@@ -926,3 +955,13 @@ def prepare_logits_processor(
         if top_k > 0:
             processor_list.append(TopKLogitsWarper(top_k))
     return processor_list
+
+
+def update_kv_cache_lagacy(output, route_indices, past_seen_tokens):
+    prev_cache = torch.arange(0, past_seen_tokens)
+    curr_cache = torch.tensor(route_indices) + past_seen_tokens
+    cache_indices = torch.cat([prev_cache, curr_cache], dim=-1)
+    for layer_idx in range(len(output["past_key_values"].key_cache)):
+        output["past_key_values"].key_cache[layer_idx] = output["past_key_values"].key_cache[layer_idx][:, :, cache_indices, :]
+        output["past_key_values"].value_cache[layer_idx] = output["past_key_values"].value_cache[layer_idx][:, :, cache_indices, :]
+        print(output["past_key_values"].value_cache[layer_idx].shape)
