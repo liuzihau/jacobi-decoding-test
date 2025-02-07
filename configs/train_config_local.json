@@ -10,7 +10,7 @@
     "debug_mode": false,
     "use_multi_token_sets": true,
     "token_sets_inline": false,
-    "jacobi_token_nums": 2,
+    "jacobi_token_nums": 3,
     "mix_sequences": 2,
     "projection_frequency": 4,
     "adapter_type": "Qwen2MLP",
