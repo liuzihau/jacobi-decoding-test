@@ -577,6 +577,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         jacobi_indices: Optional[torch.Tensor] = None,
         cat_indices: Optional[torch.Tensor] = None,
         num_logits_to_keep: int = 0,
+        inference=False,
         **loss_kwargs,
     ) -> Union[Tuple, JacobiCausalLMOutputWithPast]:
 
@@ -625,7 +626,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
             # max_sequence = 0
             jacobi_logits, jacobi_hidden_states, jacobi_all_hidden_states = None, None, None
-            if self.training:
+            if not inference:
                 if output_hidden_states:
                     all_hidden_states = outputs["hidden_states"]
                     jacobi_all_hidden_states = []
@@ -758,7 +759,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             use_cache=True,
             output_hidden_states=False,
-            return_dict=True
+            return_dict=True,
+            inference=True
             )
 
         # only support batch == 1
@@ -842,7 +844,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 output_hidden_states=False,
                 return_dict=True,
                 jacobi_indices = jacobi_indices,
-                cat_indices = cat_indices
+                cat_indices = cat_indices,
+                inference=True
                 )
             
             i = 0  # only support batch == 1
