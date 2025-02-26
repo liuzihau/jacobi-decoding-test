@@ -21,7 +21,7 @@ from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
     
 CONFIG_PATH = '/content/jacobi-decoding-test/configs/train_config_colab.json'
 # CONFIG_PATH = './configs/train_config_local.json'
-PROJECT = 'Jacobi-test'
+PROJECT = 'Jacobi-test-2'
 GAMMA = 0.9
 
 def compute_loss(hidden_state_target, target_logits, jacobi_hidden_states, jacobi_logits, all_layers_outputs, jacobi_weight, criterion, jacobi_token_nums, gamma_weights):
