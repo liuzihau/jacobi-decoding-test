@@ -136,7 +136,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         if self.shared_jacobi_token:
             return nn.Parameter(temp_weight)
         else:
-            return torch.stack([nn.Parameter(temp_weight)] * self.jacobi_token_nums, dim=0)
+            stacked_weight = torch.stack([temp_weight] * self.jacobi_token_nums, dim=0)
+            return nn.Parameter(stacked_weight)
 
     def init_trainable_weights(self, name, param, method='kaiming'):
         std = self.config.initializer_range
@@ -905,10 +906,10 @@ def decoding_normal_token(normal_token_dist, temperature=0.0, top_p=0.0, top_k=0
     # if temperature == 0 and top_p == 0 and top_k == 0:
     return normal_token_dist.argmax(dim=-1)
 
-def decoding_jacobi_token(jacobi_token_dist, temperature=0.0, top_p=0.0, top_k=0):
+def decoding_jacobi_token(jacobi_token_dist, temperature=0.0, top_p=0.0, top_k=0, expand=3):
     # top_3
     # if temperature == 0 and top_p == 0 and top_k == 0:
-    top = torch.topk(jacobi_token_dist, 3, dim=-1)
+    top = torch.topk(jacobi_token_dist, expand, dim=-1)
     topk_index, topk_p = top.indices, top.values
     return topk_index, topk_p
 
