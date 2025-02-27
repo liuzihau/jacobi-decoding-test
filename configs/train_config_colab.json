@@ -21,7 +21,7 @@
     },
     "shared_adapter": false,
     "layer_norm": true,
-    "shared_jacobi_token": false,
+    "shared_jacobi_token": true,
     "train_data_portion": 0.095,
     "test_data_portion": 0.95,
     "bs": 2,
