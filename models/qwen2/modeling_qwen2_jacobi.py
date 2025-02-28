@@ -73,6 +73,19 @@ class BasicLinear(nn.Module):
             x = self.act_fn(x)
         return x
 
+class EnhancedQwen2MLP(nn.Module):
+    def __init__(self, input_size, output_size, intermediate_ratio=2, clamp=False):
+        super().__init__()
+        self.layer1 = Qwen2MLP(input_size, input_size, intermediate_ratio, clamp)
+        self.layer2 = Qwen2MLP(input_size, output_size, intermediate_ratio, clamp)
+        self.norm = nn.LayerNorm(input_size)
+
+    def forward(self, hidden_state):
+        residual = hidden_state
+        x = self.layer1(hidden_state)
+        x = self.norm(x + residual)  # Residual connection
+        return self.layer2(x)
+
 class ProjectionQwen2MLP(nn.Module):
     def __init__(self, input_size, output_size, intermediate_ratio=None, clamp=False, layers=1):
         super().__init__()
@@ -89,6 +102,14 @@ class ProjectionLinear(nn.Module):
     def forward(self, hidden_state, idx):
         return self.module_list[idx](hidden_state)
 
+class ProjectionEnhancedQwen2MLP(nn.Module):
+    def __init__(self, input_size, output_size, intermediate_ratio=None, clamp=False, layers=1):
+        super().__init__()
+        self.module_list = nn.ModuleList([EnhancedQwen2MLP(input_size, output_size, intermediate_ratio, clamp) for _ in range(layers)])
+    
+    def forward(self, hidden_state, idx):
+        return self.module_list[idx](hidden_state)
+    
 class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
@@ -121,6 +142,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             adapter_module = ProjectionLinear
         elif adapter_type == 'Qwen2MLP':
             adapter_module = ProjectionQwen2MLP
+        elif adapter_type == 'EnhancedQwen2MLP':
+            adapter_module = ProjectionEnhancedQwen2MLP
         else:
             raise NotImplementedError(f"{adapter_type} hasn't been implemented")
         if self.shared_adapter:
@@ -730,6 +753,9 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             tokenizer=None
             ):
         
+        if not do_sample:
+            temperature = 0.0
+
         input_processor = InputProcessor(input_ids.dtype, torch.float32, input_ids.dtype, input_ids.device, self.jacobi_token_nums, self.mix_sequences)
         past_key_values = DynamicCache()
         tt = 0
@@ -771,10 +797,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             output["past_key_values"].value_cache[layer_idx] = output["past_key_values"].value_cache[layer_idx][:, :, route_indices, :]
         past_seen_tokens = output["past_key_values"].get_seq_length()
 
-        normal_token_dist = nn.Softmax(dim=-1)(output["logits"][i, prev_index[i]])
-        jacobi_token_dist = nn.Softmax(dim=-1)(output["logits"][i, jacobi_index[i]])
-        normal_token = decoding_normal_token(normal_token_dist, temperature, top_p, top_k)
-        jacobi_token, jacobi_token_p = decoding_jacobi_token(jacobi_token_dist, temperature, top_p, top_k)
+        normal_token = decoding_normal_token(output["logits"][i, prev_index[i]], temperature, top_p, top_k)
+        jacobi_token, jacobi_token_p, all_p = decoding_jacobi_token(output["logits"][i, jacobi_index[i]], temperature, top_p, top_k)
         current_decoded_tokens = normal_token.view(1, -1)
 
         # normal_token_dist = nn.Softmax(dim=-1)(output["logits"][0])
@@ -852,8 +876,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             i = 0  # only support batch == 1
 
             # sample
-            token_dist = nn.Softmax(dim=-1)(output["logits"][i])
-            token_sampled = decoding_normal_token(token_dist, temperature, top_p, top_k)
+            token_sampled = decoding_normal_token(output["logits"][i], temperature, top_p, top_k)
             
             # verify (cheap)
             route_indices, ans_list = verify_final_route(input_ids[i], token_sampled, trees[i], force_autoregressive, tokenizer)
@@ -882,8 +905,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             jacobi_index_start = route_indices[-1]+1
             jacobi_index_end = jacobi_index_start + self.jacobi_token_nums
             selected_jacobi_indices = torch.arange(jacobi_index_start, jacobi_index_end)
-            jacobi_token_dist = token_dist[selected_jacobi_indices]
-            jacobi_token, jacobi_token_p = decoding_jacobi_token(jacobi_token_dist, temperature, top_p, top_k)
+            jacobi_token_logits = output["logits"][i][selected_jacobi_indices]
+            jacobi_token, jacobi_token_p = decoding_jacobi_token(jacobi_token_logits, temperature, top_p, top_k)
         return current_decoded_tokens[:max_new_tokens], tt, ct
 
 def update_kv_cache(output, route_indices, past_seen_tokens):
@@ -901,17 +924,121 @@ def update_kv_cache(output, route_indices, past_seen_tokens):
             output["past_key_values"].key_cache[layer_idx] = key_cache.index_select(2, cache_indices)
             output["past_key_values"].value_cache[layer_idx] = value_cache.index_select(2, cache_indices)
 
-def decoding_normal_token(normal_token_dist, temperature=0.0, top_p=0.0, top_k=0.0):
-    # greedy
-    # if temperature == 0 and top_p == 0 and top_k == 0:
-    return normal_token_dist.argmax(dim=-1)
+def decoding_normal_token(logits, temperature=0.0, top_p=0.0, top_k=0.0):
+    """
+    Decode token from logits with support for greedy decoding, temperature adjustment,
+    top-k sampling, and top-p (nucleus) sampling, aligned with Hugging Face's approach.
+    
+    Args:
+        logits (torch.Tensor): Logits of shape (batch_size, vocab_size).
+        temperature (float): Temperature for scaling logits. If 0.0, use greedy decoding.
+        top_p (float): Top-p threshold for nucleus sampling. If 0.0, no top-p filtering.
+        top_k (float): Number of top tokens for top-k sampling. If 0.0, no top-k filtering.
+    
+    Returns:
+        torch.Tensor: Sampled token indices of shape (batch_size,).
+    """
+    # Step 1: Greedy decoding if temperature is 0.0
+    if temperature == 0.0:
+        return logits.argmax(dim=-1)
+    
+    # Step 2: Apply temperature scaling to logits
+    logits = logits / temperature
+    
+    # Step 3: Apply top-k filtering if top_k > 0
+    if top_k > 0:
+        # Ensure top_k doesn't exceed vocabulary size
+        top_k = min(int(top_k), logits.size(-1))
+        # Get top-k logits; values is used for thresholding
+        values, _ = torch.topk(logits, k=top_k, dim=-1)
+        # Threshold: smallest value in top-k
+        min_values = values[..., -1].unsqueeze(-1)
+        # Set logits below threshold to -inf
+        logits = torch.where(logits >= min_values, logits, torch.full_like(logits, -float('inf')))
+    
+    # Step 4: Apply top-p filtering if 0 < top_p < 1.0
+    if top_p > 0 and top_p < 1.0:
+        # Sort logits in descending order
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        # Compute cumulative probabilities
+        cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+        # Tokens to remove: where cumulative probability exceeds top_p
+        sorted_indices_to_remove = cumulative_probs > top_p
+        # Shift mask to include the token that makes cumulative prob exceed top_p
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        # Always keep the top token
+        sorted_indices_to_remove[..., 0] = 0
+        # Get indices to remove in original order
+        batch_idx, sorted_idx = torch.where(sorted_indices_to_remove)
+        if batch_idx.size(0) > 0:  # Only proceed if there are tokens to remove
+            original_idx = sorted_indices[batch_idx, sorted_idx]
+            logits[batch_idx, original_idx] = -float('inf')
+    
+    # Step 5: Compute probabilities and sample
+    probs = torch.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-def decoding_jacobi_token(jacobi_token_dist, temperature=0.0, top_p=0.0, top_k=0, expand=3):
-    # top_3
-    # if temperature == 0 and top_p == 0 and top_k == 0:
-    top = torch.topk(jacobi_token_dist, expand, dim=-1)
+def decoding_jacobi_token(logits, temperature=0.0, top_p=0.0, top_k=0, expand=3):
+    """
+    Decode Jacobi tokens from logits, supporting greedy selection of top candidates or
+    sampling, always returning probabilities and full distribution.
+    
+    Args:
+        logits (torch.Tensor): Logits of shape (batch_size, seq_len, vocab_size), where
+                               seq_len includes Jacobi tokens predicting future tokens.
+        temperature (float): Temperature for scaling logits. If 0.0, use greedy decoding.
+        top_p (float): Top-p threshold for nucleus sampling. If 0.0, no top-p filtering.
+        top_k (float): Number of top tokens for top-k sampling. If 0, no top-k filtering.
+        expand (int): Number of top candidates to return (default=3).
+    
+    Returns:
+        tuple:
+            - topk_index (torch.Tensor): Top `expand` token indices of shape (batch_size, seq_len, expand).
+            - topk_p (torch.Tensor): Corresponding probabilities of shape (batch_size, seq_len, expand).
+            - probs (torch.Tensor): Full probability distribution of shape (batch_size, seq_len, vocab_size).
+    """
+    # Step 1: Greedy decoding case (your suggestion, returning probs)
+    if temperature == 0.0 and top_p == 0.0 and top_k == 0:
+        probs = torch.softmax(logits, dim=-1)
+        top = torch.topk(probs, expand, dim=-1)
+        topk_index, topk_probs = top.indices, top.values
+        return topk_index, topk_probs, probs  # Return full probs in greedy mode
+    
+    # Step 2: Sampling mode (temperature > 0 or top_k/top_p specified)
+    # Apply temperature scaling to logits
+    if temperature > 0:
+        logits = logits / temperature
+    else:
+        logits = logits.clone()  # Avoid modifying input if temperature is invalid
+    
+    # Step 3: Apply top-k filtering if top_k > 0
+    if top_k > 0:
+        top_k = min(int(top_k), logits.size(-1))
+        values, _ = torch.topk(logits, k=top_k, dim=-1)
+        min_values = values[..., -1].unsqueeze(-1)
+        logits = torch.where(logits >= min_values, logits, torch.full_like(logits, -float('inf')))
+    
+    # Step 4: Apply top-p filtering if 0 < top_p < 1.0
+    if top_p > 0 and top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+        batch_idx, seq_idx, sorted_idx = torch.where(sorted_indices_to_remove)
+        if batch_idx.size(0) > 0:
+            original_idx = sorted_indices[batch_idx, seq_idx, sorted_idx]
+            logits[batch_idx, seq_idx, original_idx] = -float('inf')
+    
+    # Step 5: Compute full probability distribution
+    probs = torch.softmax(logits, dim=-1)
+    
+    # Step 6: Get top `expand` candidates from probabilities
+    top = torch.topk(probs, expand, dim=-1)
     topk_index, topk_p = top.indices, top.values
-    return topk_index, topk_p
+    
+    # Return indices, their probabilities, and full distribution
+    return topk_index, topk_p, probs
 
 def verify_final_route(inputs, outputs, tree, force_autoregressive=False, tokenizer=None):
     # print("="*100)
