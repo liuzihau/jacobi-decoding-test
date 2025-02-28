@@ -1,5 +1,5 @@
 {
-    "name": "Split jacobi weight",
+    "name": "Split jacobi weight EnhanceQwen2MLP",
     "api_key": "",
     "basepath":"/content/drive/MyDrive/LLMs_weight/qwen/checkpoints/Qwen2.5-0.5B-Instruct",
     "statepath": null,
@@ -13,10 +13,10 @@
     "jacobi_token_nums": 4,
     "mix_sequences": 1,
     "projection_frequency": 4,
-    "adapter_type": "Qwen2MLP",
+    "adapter_type": "EnhancedQwen2MLP",
     "initialise_method": "kaiming",
     "jacobi_adapter_kwargs":{
-        "intermediate_ratio": null,
+        "intermediate_ratio": 1.5,
         "clamp":false
     },
     "shared_adapter": false,
