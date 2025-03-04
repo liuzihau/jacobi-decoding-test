@@ -879,7 +879,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             token_sampled = decoding_normal_token(output["logits"][i], temperature, top_p, top_k)
             
             # verify (cheap)
-            route_indices, ans_list = verify_final_route(input_ids[i], token_sampled, trees[i], force_autoregressive, tokenizer)
+            route_indices, ans_list = verify_final_route(input_ids[i], token_sampled, trees[i], force_autoregressive, do_sample, tokenizer)
             tt += 1
             for i in range(len(ans_list)):
                 if tuple(ans_list[:i+1]) in ct:
@@ -1040,11 +1040,13 @@ def decoding_jacobi_token(logits, temperature=0.0, top_p=0.0, top_k=0, expand=3)
     # Return indices, their probabilities, and full distribution
     return topk_index, topk_p, probs
 
-def verify_final_route(inputs, outputs, tree, force_autoregressive=False, tokenizer=None):
+def verify_final_route(inputs, outputs, tree, force_autoregressive=False, do_sample=False, tokenizer=None):
     # print("="*100)
     curr_node = tree.root
     index = tree.index_dict[curr_node]
     curr_ans, final_route, ans_list = outputs[index], curr_node.route, []
+
+    
     if not force_autoregressive:
         found_ans = True
         while len(curr_node.children) > 0 and found_ans:
@@ -1058,14 +1060,16 @@ def verify_final_route(inputs, outputs, tree, force_autoregressive=False, tokeni
                 # b = b.replace("\n", "\\n")
                 # c = c.replace("\n", "\\n")
                 # print(f"ans: <{a}>, pred: <{b}>, next_ans: <{c}>")
-
-                if curr_pred == curr_ans:
-                    final_route = node.route
-                    curr_ans = next_ans
-                    curr_node = node
-                    found_ans = True
-                    ans_list.append(i)
-                    break
+                if do_sample:
+                    pass
+                else:
+                    if curr_pred == curr_ans:
+                        final_route = node.route
+                        curr_ans = next_ans
+                        curr_node = node
+                        found_ans = True
+                        ans_list.append(i)
+                        break
 
     return final_route, ans_list
 
