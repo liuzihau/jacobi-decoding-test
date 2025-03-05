@@ -881,11 +881,11 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             # verify (cheap)
             route_indices, ans_list = verify_final_route(input_ids[i], token_sampled, trees[i], force_autoregressive, do_sample, tokenizer)
             tt += 1
-            for i in range(len(ans_list)):
-                if tuple(ans_list[:i+1]) in ct:
-                    ct[tuple(ans_list[:i+1])] += 1
+            for c in range(len(ans_list)):
+                if tuple(ans_list[:c+1]) in ct:
+                    ct[tuple(ans_list[:c+1])] += 1
                 else:
-                    ct[tuple(ans_list[:i+1])] = 1
+                    ct[tuple(ans_list[:c+1])] = 1
             
             verified_tokens = token_sampled[route_indices]
             current_decoded_tokens = torch.cat([current_decoded_tokens, verified_tokens.view(1, -1)], dim=-1)
