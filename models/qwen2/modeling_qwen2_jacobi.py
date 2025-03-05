@@ -906,7 +906,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             jacobi_index_end = jacobi_index_start + self.jacobi_token_nums
             selected_jacobi_indices = torch.arange(jacobi_index_start, jacobi_index_end)
             jacobi_token_logits = output["logits"][i][selected_jacobi_indices]
-            jacobi_token, jacobi_token_p = decoding_jacobi_token(jacobi_token_logits, temperature, top_p, top_k)
+            jacobi_token, jacobi_token_p, all_p = decoding_jacobi_token(jacobi_token_logits, temperature, top_p, top_k)
         return current_decoded_tokens[:max_new_tokens], tt, ct
 
 def update_kv_cache(output, route_indices, past_seen_tokens):
