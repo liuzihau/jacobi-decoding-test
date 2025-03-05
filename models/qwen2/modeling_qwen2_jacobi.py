@@ -78,7 +78,7 @@ class EnhancedQwen2MLP(nn.Module):
         super().__init__()
         self.layer1 = Qwen2MLP(input_size, input_size, intermediate_ratio, clamp)
         self.layer2 = Qwen2MLP(input_size, output_size, intermediate_ratio, clamp)
-        self.norm = nn.LayerNorm(input_size)
+        self.norm = Qwen2RMSNorm(input_size)
 
     def forward(self, hidden_state):
         residual = hidden_state
@@ -878,6 +878,10 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             # sample
             token_sampled = decoding_normal_token(output["logits"][i], temperature, top_p, top_k)
             
+            # 
+            entropy = calculate_entropy(all_p)
+            threshold = get_threshold(entropy)
+
             # verify (cheap)
             route_indices, ans_list = verify_final_route(input_ids[i], token_sampled, trees[i], force_autoregressive, do_sample, tokenizer)
             tt += 1
@@ -1073,6 +1077,17 @@ def verify_final_route(inputs, outputs, tree, force_autoregressive=False, do_sam
 
     return final_route, ans_list
 
+def calculate_entropy(posterior_prob):
+    return -torch.sum(
+            posterior_prob * torch.log(posterior_prob + 1e-5), dim=-1
+        )
+
+def get_threshold(posterior_entropy, posterior_threshold=0.3, posterior_alpha = 0.09):
+    return torch.minimum(
+        torch.ones_like(posterior_entropy) * posterior_threshold,
+        torch.exp(-posterior_entropy) * posterior_alpha,
+    )
+
 def prepare_logits_processor(
         temperature: float = 0.0,
         repetition_penalty: float = 0.0,
@@ -1090,7 +1105,6 @@ def prepare_logits_processor(
         if top_k > 0:
             processor_list.append(TopKLogitsWarper(top_k))
     return processor_list
-
 
 def update_kv_cache_lagacy(output, route_indices, past_seen_tokens):
     prev_cache = torch.arange(0, past_seen_tokens)
