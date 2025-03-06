@@ -78,12 +78,13 @@ class EnhancedQwen2MLP(nn.Module):
         super().__init__()
         self.layer1 = Qwen2MLP(input_size, input_size, intermediate_ratio, clamp)
         self.layer2 = Qwen2MLP(input_size, output_size, intermediate_ratio, clamp)
-        self.norm = Qwen2RMSNorm(input_size)
+        self.layernorm = Qwen2RMSNorm(input_size)
 
     def forward(self, hidden_state):
         residual = hidden_state
         x = self.layer1(hidden_state)
-        x = self.norm(x + residual)  # Residual connection
+        x = self.layernorm(x + residual)  # Residual connection
+        # x = x + residual
         return self.layer2(x)
 
 class ProjectionQwen2MLP(nn.Module):
