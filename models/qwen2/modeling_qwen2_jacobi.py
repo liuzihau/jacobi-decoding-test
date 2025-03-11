@@ -132,11 +132,12 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         
         attn_layers, attn_hidden_size = config.num_hidden_layers, config.hidden_size
-        self.pre_adapter_layernorm = Qwen2RMSNorm(attn_hidden_size*(self.mix_sequences+1))
         if self.fuse_previous_hidden_states:
-            input_size = attn_hidden_size * self.proj_freq
+            input_size = attn_hidden_size * (self.proj_freq+1)
         else:
             input_size = attn_hidden_size
+        
+        self.pre_adapter_layernorm = Qwen2RMSNorm(input_size)
         self.adapters = self.init_adapter(adapter_type, attn_layers, input_size, attn_hidden_size, jacobi_adapter_kwargs)
         self.jacobi_weight = self.init_jacobi_token(attn_hidden_size)
         
