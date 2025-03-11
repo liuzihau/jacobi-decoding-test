@@ -84,7 +84,6 @@ class EnhancedQwen2MLP(nn.Module):
         residual = hidden_state
         x = self.layer1(hidden_state)
         x = self.layernorm(x + residual)  # Residual connection
-        # x = x + residual
         return self.layer2(x)
 
 class ProjectionQwen2MLP(nn.Module):
@@ -115,7 +114,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     
-    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4, adapter_type='Linear', shared_adapter=True, shared_jacobi_token=True, jacobi_adapter_kwargs=None, layer_norm=False, token_sets_inline=True, decoding_mode="jacobi"):
+    def __init__(self, config, jacobi_token_nums=2, mix_sequences=1, proj_freq=4, adapter_type='Linear', shared_adapter=True, fuse_previous_hidden_states=False, shared_jacobi_token=True, jacobi_adapter_kwargs=None, layer_norm=False, token_sets_inline=True, decoding_mode="jacobi"):
         super().__init__(config)
         self.confg = config
         self.token_sets_inline = token_sets_inline
@@ -125,6 +124,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.proj_freq = proj_freq
         self.jacobi_token_nums = jacobi_token_nums
         self.shared_adapter = shared_adapter
+        self.fuse_previous_hidden_states = fuse_previous_hidden_states
         self.shared_jacobi_token = shared_jacobi_token
         self.layer_norm = layer_norm
         self.decoding_mode = decoding_mode
@@ -133,12 +133,16 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         
         attn_layers, attn_hidden_size = config.num_hidden_layers, config.hidden_size
         self.pre_adapter_layernorm = Qwen2RMSNorm(attn_hidden_size*(self.mix_sequences+1))
-        self.adapters = self.init_adapter(adapter_type, attn_layers, attn_hidden_size, jacobi_adapter_kwargs)
+        if self.fuse_previous_hidden_states:
+            input_size = attn_hidden_size * self.proj_freq
+        else:
+            input_size = attn_hidden_size
+        self.adapters = self.init_adapter(adapter_type, attn_layers, input_size, attn_hidden_size, jacobi_adapter_kwargs)
         self.jacobi_weight = self.init_jacobi_token(attn_hidden_size)
         
         self.post_init()
 
-    def init_adapter(self, adapter_type, attn_layers, attn_hidden_size, jacobi_adapter_kwargs):
+    def init_adapter(self, adapter_type, attn_layers, input_size, output_size, jacobi_adapter_kwargs):
         if adapter_type == "Linear":
             adapter_module = ProjectionLinear
         elif adapter_type == 'Qwen2MLP':
@@ -152,7 +156,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         else:
             adapter_layers = attn_layers // self.proj_freq
         jacobi_adapter_kwargs = {} if jacobi_adapter_kwargs is None else jacobi_adapter_kwargs        
-        return adapter_module((self.mix_sequences+1)*attn_hidden_size, attn_hidden_size, layers=adapter_layers, **jacobi_adapter_kwargs)
+        return adapter_module(input_size, output_size, layers=adapter_layers, **jacobi_adapter_kwargs)
 
     def init_jacobi_token(self, attn_hidden_size):
         temp_weight = torch.ones((attn_hidden_size,), device=self.model.device, dtype=torch.float32) * 1e-5
@@ -318,7 +322,7 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             
             pointer += group
             
-    def forward_backbone_decoder_layer(self, decoder_layer, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings, jacobi_indices, cat_indices):
+    def forward_backbone_decoder_layer(self, decoder_layer, hidden_states, causal_mask, loss_mask, position_ids, past_key_values, output_attentions, use_cache, cache_position, position_embeddings, jacobi_indices, cat_indices, all_hidden_states):
         residual = hidden_states
         # Self Attention
         if PERFORMANCE_CHECK:
@@ -374,15 +378,20 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             else:
                 adapter_idx = layer_idx // self.proj_freq
 
+            if self.fuse_previous_hidden_states:
+                used_states = torch.cat(all_hidden_states[(-self.proj_freq+1):] + (hidden_states,), dim=-1)
+            else:
+                used_states = hidden_states
+
             if cat_indices is not None:
                 if PERFORMANCE_CHECK:
                     kwargs = {
-                        "hidden_states":hidden_states,
+                        "hidden_states":used_states,
                         "cat_indices":cat_indices
                         }
                     curr_states = timer.record_time("cat_tokens", self.cat_tokens_with_index, **kwargs)
                 else:
-                    curr_states = self.cat_tokens_with_index(hidden_states, cat_indices)
+                    curr_states = self.cat_tokens_with_index(used_states, cat_indices)
 
             else:
                 if self.token_sets_inline:
@@ -392,15 +401,15 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
                     if PERFORMANCE_CHECK:
                         kwargs = {
-                        "hidden_states":hidden_states,
+                        "hidden_states":used_states,
                         "loss_mask":loss_mask
                         }
                         curr_states = timer.record_time("cat_tokens", self.cat_tokens_inline, **kwargs)
                     else:
-                        curr_states = self.cat_tokens_inline(hidden_states, loss_mask)
+                        curr_states = self.cat_tokens_inline(used_states, loss_mask)
 
                 else:
-                    curr_states = self.cat_tokens_split(hidden_states, loss_mask)
+                    curr_states = self.cat_tokens_split(used_states, loss_mask)
             
             if self.layer_norm:
                 curr_states = self.pre_adapter_layernorm(curr_states)
@@ -456,7 +465,8 @@ class Qwen2JacobiForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
                 jacobi_indices = jacobi_indices,
-                cat_indices = cat_indices)
+                cat_indices = cat_indices,
+                all_hidden_states=all_hidden_states)
 
             hidden_states = layer_outputs[0]
 
