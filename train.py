@@ -79,6 +79,7 @@ model = Qwen2JacobiForCausalLM.from_pretrained(
     proj_freq=train_config["projection_frequency"],
     adapter_type=train_config["adapter_type"],
     shared_adapter=train_config["shared_adapter"],
+    fuse_previous_hidden_states=train_config["fuse_previous_hidden_states"],
     shared_jacobi_token=train_config["shared_jacobi_token"],
     layer_norm=train_config["layer_norm"],
     jacobi_adapter_kwargs=jacobi_adapter_kwargs,

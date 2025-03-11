@@ -1,5 +1,5 @@
 {
-    "name": "Same jacobi weight Qwen2MLP 3",
+    "name": "Same jacobi fuse hidden states",
     "api_key": "",
     "basepath":"/content/drive/MyDrive/LLMs_weight/qwen/checkpoints/Qwen2.5-0.5B-Instruct",
     "statepath": null,
@@ -16,10 +16,11 @@
     "adapter_type": "Qwen2MLP",
     "initialise_method": "kaiming",
     "jacobi_adapter_kwargs":{
-        "intermediate_ratio": 3,
+        "intermediate_ratio": 2,
         "clamp":false
     },
     "shared_adapter": false,
+    "fuse_previous_hidden_states":true,
     "layer_norm": true,
     "shared_jacobi_token": true,
     "train_data_portion": 0.095,
