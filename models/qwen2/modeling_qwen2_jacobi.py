@@ -33,30 +33,98 @@ class JacobiCausalLMOutputWithPast(ModelOutput):
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
 
 
+import torch
+import torch.nn as nn
+import math
+
 class Qwen2MLP(nn.Module):
-    def __init__(self, input_size, output_size, intermediate_ratio=None, clamp=False):
+    def __init__(self, input_size, output_size, intermediate_ratio=None, clamp=False, use_dora=False, dora_rank=16, dora_alpha=32):
         super().__init__()
         self.input_size = input_size
         self.clamp = clamp
+        self.use_dora = use_dora
+        self.dora_rank = dora_rank
+        self.dora_alpha = dora_alpha  # Scaling factor for DoRA updates
         if self.clamp:
             print("adapter uses clamp")
         self.intermediate_size = int(input_size * intermediate_ratio) if intermediate_ratio is not None else input_size * 2
         self.hidden_size = output_size
+
+        # Original linear layers (frozen if DoRA is enabled)
         self.gate_proj = nn.Linear(self.input_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.input_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = nn.SiLU()
 
+        if self.use_dora:
+            # Freeze original weights
+            for layer in [self.gate_proj, self.up_proj, self.down_proj]:
+                for param in layer.parameters():
+                    param.requires_grad = False
+
+            # Decompose and initialize DoRA components for each layer
+            self._initialize_dora(self.gate_proj, self.input_size, self.intermediate_size)
+            self._initialize_dora(self.up_proj, self.input_size, self.intermediate_size)
+            self._initialize_dora(self.down_proj, self.intermediate_size, self.hidden_size)
+
+    def _initialize_dora(self, layer, in_features, out_features):
+        # Decompose original weight into magnitude and direction
+        with torch.no_grad():
+            weight = layer.weight.data
+            magnitude = torch.norm(weight, dim=1, keepdim=True)  # Row-wise norm
+            direction = weight / (magnitude + 1e-8)  # Unit-norm direction
+
+        # Store magnitude as a trainable parameter
+        setattr(layer, "magnitude", nn.Parameter(magnitude.clone()))
+
+        # Low-rank update matrices (A and B) for direction
+        setattr(layer, "dora_A", nn.Parameter(torch.zeros(in_features, self.dora_rank)))
+        setattr(layer, "dora_B", nn.Parameter(torch.zeros(self.dora_rank, out_features)))
+        
+        # Initialize A with Kaiming, B with zeros
+        nn.init.kaiming_uniform_(getattr(layer, "dora_A"), a=math.sqrt(5))
+        nn.init.zeros_(getattr(layer, "dora_B"))
+
+        # Store the frozen direction
+        setattr(layer, "direction", direction.detach())
+
+    def _apply_dora(self, layer, x):
+        # Compute the low-rank update to direction
+        dora_update = self.dora_alpha * (x @ getattr(layer, "dora_A") @ getattr(layer, "dora_B"))
+        
+        # Original weight = magnitude * direction
+        weight = getattr(layer, "magnitude") * getattr(layer, "direction")
+        
+        # New weight = magnitude * (direction + low-rank update)
+        output = x @ (weight + dora_update)
+        return output
+
     def forward(self, hidden_state):
-        gate_proj = self.gate_proj(hidden_state)
+        # Gate projection with DoRA
+        if self.use_dora:
+            gate_proj = self._apply_dora(self.gate_proj, hidden_state)
+        else:
+            gate_proj = self.gate_proj(hidden_state)
         if self.clamp:
             gate_proj = torch.clamp(gate_proj, min=-1e2, max=1e2)
         gate_proj = self.act_fn(gate_proj)
-        up_proj = self.up_proj(hidden_state)
+
+        # Up projection with DoRA
+        if self.use_dora:
+            up_proj = self._apply_dora(self.up_proj, hidden_state)
+        else:
+            up_proj = self.up_proj(hidden_state)
+
+        # Combine
         proj = gate_proj * up_proj
         if self.clamp:
             proj = torch.clamp(proj, min=-1e3, max=1e3)
-        return self.down_proj(proj)
+
+        # Down projection with DoRA
+        if self.use_dora:
+            return self._apply_dora(self.down_proj, proj)
+        else:
+            return self.down_proj(proj)
 
 class BasicLinear(nn.Module):
     def __init__(self, input_size, output_size, act=False):

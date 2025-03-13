@@ -17,7 +17,10 @@
     "initialise_method": "kaiming",
     "jacobi_adapter_kwargs":{
         "intermediate_ratio": 2,
-        "clamp":false
+        "clamp":false,
+        "use_dora":true,
+        "dora_rank":16,
+        "dora_alpha":32
     },
     "shared_adapter": false,
     "fuse_previous_hidden_states":true,
@@ -25,7 +28,7 @@
     "shared_jacobi_token": true,
     "train_data_portion": 0.095,
     "test_data_portion": 0.95,
-    "bs": 1,
+    "bs": 2,
     "lr": 1e-04,
     "is_warmup": true,
     "num_epochs": 20,
