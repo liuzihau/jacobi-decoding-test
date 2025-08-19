@@ -1,10 +1,12 @@
 transformer*
 Qwen2.5*
-data_root*
+qwen*
+datasets
 record*
 samples*
 memo*
 wandb*
 jacobi_test_weights*
 jacobi-weights*
-___*
+__*
+*.pyc

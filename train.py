@@ -11,13 +11,13 @@ from torch.utils.data import DataLoader
 from torch import nn, optim
 
 from transformers import get_linear_schedule_with_warmup
+from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 
 from tools.data_processing_v2 import JacobiDatasetV2, JacobiCollatorV2
 from tools.utils import top_accuracy, save_trainable_weights
 from models.tata import TaTa
-from models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 from configs.config import TDataCfg, TMetaCfg, TModelCfg, TrainCfg, TrainScriptConfig, to_obj     
 
 
