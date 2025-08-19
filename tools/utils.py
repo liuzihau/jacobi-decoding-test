@@ -1,140 +1,252 @@
+import json
 import time
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+
 import torch
+from torch import nn
 from safetensors import safe_open
 
-PERFORMANCE_CHECK = False
+
+# -------------------------------------------------------------------
+# Timing utilities
+# -------------------------------------------------------------------
+
+@dataclass
+class Stat:
+    total: float = 0.0
+    count: int = 0
+
+    def add(self, dt: float) -> None:
+        self.total += dt
+        self.count += 1
+
+    @property
+    def avg(self) -> float:
+        return self.total / max(1, self.count)
+
 
 class Timer:
-    def __init__(self):
-        self.report = {}
+    """
+    Lightweight profiler with CPU or CUDA timing.
+    Usage:
+        with timer.profile("tag"):
+            fn()
+        # or
+        out = timer.record_time("tag", fn, **kwargs)
+        # or
+        @timer.timeit("tag")
+        def foo(...): ...
 
-    def record_time(self, key, func, **kwargs):
-        s = time.time()
-        res = func(**kwargs)
-        delta = time.time() - s
-        if key in self.report:
-            self.report[key]["time"] += delta
-            self.report[key]["count"] += 1
+    Toggle with timer.enabled = True/False
+    """
+    def __init__(self, use_cuda_events: bool = False) -> None:
+        self.enabled: bool = False
+        self.use_cuda_events: bool = bool(use_cuda_events)
+        self.report: Dict[str, Stat] = {}
+
+    def _now(self) -> float:
+        return time.perf_counter()
+
+    def _cuda_time(self, fn: Callable, **kwargs):
+        """Accurate CUDA timing using events."""
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize()
+        start.record()
+        res = fn(**kwargs)
+        end.record()
+        torch.cuda.synchronize()
+        ms = start.elapsed_time(end)  # milliseconds
+        return res, ms / 1000.0
+
+    def record_time(self, key: str, fn: Callable, **kwargs):
+        if not self.enabled:
+            return fn(**kwargs)
+        if self.use_cuda_events and torch.cuda.is_available():
+            res, dt = self._cuda_time(fn, **kwargs)
         else:
-            self.report[key] = {}
-            self.report[key]["time"] = delta
-            self.report[key]["count"] = 1        
+            t0 = self._now()
+            res = fn(**kwargs)
+            dt = self._now() - t0
+        self.report.setdefault(key, Stat()).add(dt)
         return res
 
-timer = Timer()
+    # context manager form
+    def profile(self, key: str):
+        class _Ctx:
+            def __init__(self, outer: "Timer", key: str) -> None:
+                self.outer = outer
+                self.key = key
+                self.t0: Optional[float] = None
+                self.start_event = None
+                self.end_event = None
 
-
-def top_accuracy(output, target, jacobi_token_nums, topk=(1,)):
-    # output.shape (bs, num_classes), target.shape (bs, )
-    """Computes the accuracy over the k top predictions for the specified values of k"""
-    output = output.view(-1, jacobi_token_nums, output.shape[-1])
-    target = target.view(-1, jacobi_token_nums)
-    with torch.no_grad():
-        maxk = max(topk)
-        group_size = target.size(0)
-        jacobi_seq_size = target.size(1)
-        _, pred = output.topk(maxk, -1, True, True)  # bs, seq, topk ex [4, 10, 3]
-        # pred = pred.t()
-        correct = pred.eq(target.view(group_size, jacobi_seq_size, -1).expand_as(pred))
-
-        res = []
-        for k in topk:
-            correct_k = correct[:, :, :k].float().sum(0).sum(-1)
-            res.append(correct_k)
-        return res
-def output_abnormal_message(target_p, output_logp, jacobi_hidden_states, target_hidden_state, pshape0, pshape1, vshape0, vshape1):
-    report = ""
-    report += f"[target_p contain inf]: {torch.isinf(target_p).any()}\n"
-    report += f"[target_hidden contain inf]: {torch.isinf(target_hidden_state).any()}\n"                
-    report += f"[output_logp contain inf]: {torch.isinf(output_logp).any()}\n"
-    report += f"[output_hidden contain inf]: {torch.isinf(jacobi_hidden_states).any()}\n"
-    report += f"[target_p contain nan]: {torch.isnan(target_p).any()}\n"
-    report += f"[target_hidden contain nan]: {torch.isnan(target_hidden_state).any()}\n"                
-    report += f"[output_logp contain nan]: {torch.isnan(output_logp).any()}\n"
-    report += f"[output_hidden contain nan]: {torch.isnan(jacobi_hidden_states).any()}\n"
-    report += f"[pshape]: {pshape0}, {pshape1}\n[vshape]: {vshape0}, {vshape1}"
-    return report
-
-def load_jacobi_weight(model, cpdir):
-    with safe_open(cpdir, framework="pt") as f:
-        keys = f.keys()
-        for name, param in model.named_parameters():
-            all_set = True
-            if "model." in name:
-                continue
-            if name in keys:
-                tensor_slice = f.get_slice(name)
-                tensor = tensor_slice[:].clone().detach()
-                if tensor.shape == param.shape:
-                    param.data.copy_(tensor) 
+            def __enter__(self):
+                if not self.outer.enabled:
+                    return
+                if self.outer.use_cuda_events and torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    self.start_event = torch.cuda.Event(enable_timing=True)
+                    self.end_event = torch.cuda.Event(enable_timing=True)
+                    self.start_event.record()
                 else:
-                    print(f"Shape mismatch for {name}: Model shape {param.shape}, File shape {tensor.shape}")
-            else:
-                all_set = False
-                print(f"Key {name} not found in SafeTensor file.")
-        if all_set:
-            print("All parameters has been loaded.")
+                    self.t0 = self.outer._now()
 
-def cllm_loss():
-    ### compute AutoRegression loss ###
-    # use labels to avoid pattern collapse
-    if self.use_gt_labels:
-        labels = inputs['labels_ids']
-    else:
-        labels = inputs['teacher_output_ids']
-    # TODO: check if it's right when batch size > 1
-    labels = torch.tensor(labels).to(model.device)
-    attention_mask = torch.full_like(labels, 1).to(model.device)
-    label_student_model_output = model(labels, attention_mask)
+            def __exit__(self, exc_type, exc, tb):
+                if not self.outer.enabled:
+                    return
+                if self.outer.use_cuda_events and torch.cuda.is_available():
+                    self.end_event.record()
+                    torch.cuda.synchronize()
+                    ms = self.start_event.elapsed_time(self.end_event)
+                    dt = ms / 1000.0
+                else:
+                    dt = self.outer._now() - (self.t0 or self.outer._now())
+                self.outer.report.setdefault(self.key, Stat()).add(dt)
+        return _Ctx(self, key)
 
-    attention_mask = torch.full_like(jacobian_trajectory[0], 1).to(model.device)
-    attention_mask = jacobian_trajectory[-1] != self.tokenizer.pad_token_id
-    logits_last =  self.get_logits(model, jacobian_trajectory[-1].clone().detach(), attention_mask)
+    # decorator form
+    def timeit(self, key: Optional[str] = None):
+        def deco(fn: Callable):
+            tag = key or fn.__name__
+            def wrapped(*args, **kwargs):
+                return self.record_time(tag, fn, **kwargs) if not args else self.record_time(tag, lambda **kw: fn(*args, **kw), **kwargs)
+            return wrapped
+        return deco
 
-    label_smoother = LabelSmoother(epsilon=0.1, ignore_index= -100)
-    loss_ar = label_smoother(label_student_model_output, labels, shift_labels=True)
-    loss_ar*=10
-    if self.args.qlora:
-        loss_ar.requires_grad = True
-    print(f'loss ar: {loss_ar} computed! performing backward pass...')
-    with self.accelerator.accumulate(model):
-        self.accelerator.backward(loss_ar)
+    def reset(self) -> None:
+        self.report.clear()
 
-    ### compute Consistency loss (global) ###
-    # random select one point from trajectory
-    i = random.choice(range(len(jacobian_trajectory))[:-1])
+    def as_dict(self) -> Dict[str, Dict[str, float]]:
+        return {k: {"time": v.total, "count": v.count, "avg": v.avg} for k, v in self.report.items()}
 
-    attention_mask = torch.full_like(jacobian_trajectory[0], 1).to(jacobian_trajectory[0].device)
-    attention_mask = jacobian_trajectory[i] != self.tokenizer.pad_token_id
-    logits_i = self.get_logits(model, jacobian_trajectory[i].clone().detach(), attention_mask)
+    def pretty(self) -> str:
+        lines = ["== Timer Report =="]
+        for k, v in sorted(self.report.items(), key=lambda x: -x[1].total):
+            lines.append(f"{k:32s}  total={v.total:8.4f}s  count={v.count:6d}  avg={v.avg:8.6f}s")
+        return "\n".join(lines)
 
-    output_mask = jacobian_trajectory[i][..., 1:] == self.tokenizer.pad_token_id
-    # We do not calculate the cross entrophy of same logits to alleviate misleading gradients
-    for j in range(bsz):
-        end_of_mask_position = torch.where(jacobian_trajectory[i][j, 1:] != jacobian_trajectory[-1][j, 1:])[0]
-        if len(end_of_mask_position)==0:
-            output_mask[j, :] = True
-        else:
-            output_mask[j, :end_of_mask_position[0]] = True
-    
-    loss_global = self.soft_cross_entropy(
-                logits_i[..., :-1, :].float(), # logits generated by the last token is dropped
-                logits_last[..., :-1, :].to(logits_i.device).clone().detach().float(),
-                output_mask.to(logits_i.device)
-    )
-    if self.args.qlora:
-        loss_global.requires_grad = True
-    print(f'loss global {loss_global} computed! performing backward pass...')
-    with self.accelerator.accumulate(model):
-        self.accelerator.backward(loss_global)
-    
-    if self.args.local_rank == 0:
-        wandb.log({"ar loss": loss_ar})
-        wandb.log({"consistency loss": loss_global})
+    def to_json(self, path: str) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.as_dict(), f, indent=2)
 
-    # sync processes
-    torch.distributed.barrier()
-    # total loss = ar_loss + consistency_global_loss
-    loss = loss_ar.detach() + loss_global.detach()
 
-    return loss
+# global timer + helper for legacy call-sites
+timer = Timer(use_cuda_events=True)  # set True for CUDA-accurate timings
+timer.enabled = True
+
+def _time(tag: str, fn: Callable, **kwargs):
+    """Tiny wrapper to keep your existing call sites working."""
+    return timer.record_time(tag, fn, **kwargs)
+
+# -------------------------------------------------------------------
+# Metrics / utilities
+# -------------------------------------------------------------------
+
+@torch.no_grad()
+def top_accuracy(
+    output: torch.Tensor,
+    target: torch.Tensor,
+    jacobi_token_nums: int,
+    topk: Tuple[int, ...] = (1,)
+) -> List[torch.Tensor]:
+    """
+    Computes top-k accuracy per Jacobi position and sums across groups.
+    output: [N, V] or [N, J, V]  (will be reshaped to [-1, J, V])
+    target: [N] or [N, J]        (will be reshaped to [-1, J])
+    Returns a list of tensors, one per k in topk, each shape [J] = per-position correct counts.
+    """
+    if output.dim() == 2:
+        output = output.view(-1, jacobi_token_nums, output.shape[-1])
+    if target.dim() == 1:
+        target = target.view(-1, jacobi_token_nums)
+
+    maxk = max(topk)
+    # [B, J, maxk]
+    _, pred = output.topk(maxk, dim=-1, largest=True, sorted=True)
+    # broadcast target -> [B, J, maxk]
+    tgt = target.unsqueeze(-1).expand_as(pred)
+    correct = (pred == tgt).to(torch.float32)
+
+    res = []
+    for k in topk:
+        # sum over batch, keep per-position across J
+        res.append(correct[..., :k].sum(dim=0).sum(dim=-1))  # [J]
+    return res
+
+
+def output_abnormal_message(
+    target_p: torch.Tensor,
+    output_logp: torch.Tensor,
+    jacobi_hidden_states: torch.Tensor,
+    target_hidden_state: torch.Tensor,
+    pshape0: int, pshape1: int, vshape0: int, vshape1: int,
+) -> str:
+    def _flags(t: torch.Tensor) -> str:
+        return f"inf={bool(torch.isinf(t).any())}, nan={bool(torch.isnan(t).any())}"
+    lines = [
+        f"[target_p]        {_flags(target_p)}",
+        f"[target_hidden]   {_flags(target_hidden_state)}",
+        f"[output_logp]     {_flags(output_logp)}",
+        f"[output_hidden]   {_flags(jacobi_hidden_states)}",
+        f"[pshape]: {pshape0}, {pshape1}",
+        f"[vshape]: {vshape0}, {vshape1}",
+    ]
+    return "\n".join(lines)
+
+
+@torch.no_grad()
+def load_jacobi_weight(model: torch.nn.Module, ckpt_path: str) -> None:
+    """
+    Load jacobi-specific parameters from a .safetensors file.
+    Skips backbone params (names starting with 'model.').
+    """
+    missing, mismatched = [], []
+    loaded = 0
+    with safe_open(ckpt_path, framework="pt") as f:
+        keys = set(f.keys())
+        for name, param in model.named_parameters():
+            if name.startswith("model."):
+                continue
+            if name not in keys:
+                missing.append(name)
+                continue
+            t = f.get_slice(name)[:]
+            if t.shape != param.shape:
+                mismatched.append((name, tuple(param.shape), tuple(t.shape)))
+                continue
+            param.data.copy_(t.to(device=param.device, dtype=param.dtype))
+            loaded += 1
+
+    if loaded:
+        print(f"[load_jacobi_weight] loaded {loaded} tensors from {ckpt_path}")
+    if missing:
+        print(f"[load_jacobi_weight] missing keys: {len(missing)} (e.g., {missing[:5]})")
+    if mismatched:
+        ex = ", ".join([f"{n} exp{es} got{gs}" for n, es, gs in mismatched[:3]])
+        print(f"[load_jacobi_weight] mismatched shapes: {len(mismatched)} ({ex})")
+    if not missing and not mismatched:
+        print("[load_jacobi_weight] all parameters loaded.")
+
+
+def _exec_device(mod: nn.Module) -> torch.device:
+    hk = getattr(mod, "_hf_hook", None)
+    if hk is not None and getattr(hk, "execution_device", None) is not None:
+        return torch.device(hk.execution_device)
+    # fallback when no hook (e.g., CPU runs/tests)
+    for p in mod.parameters(recurse=False):
+        return p.device
+    return torch.device("cpu")
+
+
+def save_trainable_weights(model: torch.nn.Module, save_path: str | Path):
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    # Only params that require grad
+    trainable_sd = {k: v.detach().cpu() 
+                    for k, v in model.state_dict().items()
+                    if k in dict(model.named_parameters()) and dict(model.named_parameters())[k].requires_grad}
+    torch.save(trainable_sd, save_path)
+    return save_path

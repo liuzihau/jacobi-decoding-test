@@ -1,0 +1,27 @@
+gen:
+  name: GE2
+  seed: 42
+  device: auto
+  dtype: bfloat16  # float32
+  max_len: 2048
+  jacobi_tokens: 100
+  batch_size: 1
+  do_sample: true
+  temperature: 1
+  save_hidden_dtype: float16  # float32
+  save_every: 500
+  output_folder: /home/tliu0205/jacobi-decoding-test/datasets
+data:
+  data_name: anon8231489123/ShareGPT_Vicuna_unfiltered
+  data_files: ShareGPT_V3_unfiltered_cleaned_split.json
+  split: train
+  start: 0
+  end: 20000
+  adapter: sharegpt
+model:
+  model_path: Qwen
+  model_name: Qwen3-1.7B
+save_probs:
+  mode: topk     # none|full|topk
+  top_k: 64
+  dtype: float16

@@ -1,0 +1,61 @@
+meta:
+  project: "Jacobi-test-3"
+  name: "Qwen3-CFG00"
+  api_key: ""
+  debug_mode: False
+  cpdir: "./jacobi_test_weights"
+
+model:
+  basepath: "Qwen/Qwen3-1.7B"
+  num_jacobi_tokens: 3
+  num_prev_sequences: 1
+  adapter_insertion_freq: 4 
+  adapter_type: "Qwen2MLP"
+  shared_adapter: False
+  fuse_prev_hidden_states: False
+  shared_jacobi_token: True
+  jacobi_adapter_kwargs:
+    intermediate_ratio: 2
+    clamp: False
+    use_dora: False
+    dora_rank: 512
+    dora_alpha: 1024
+  use_pre_layer_norm: True
+  token_sets_inline: False
+
+data:
+  tr_path: "./datasets/anon8231489123_ShareGPT_Vicuna_unfiltered_Qwen3-1.7B_GE2/train"
+  te_path: "./datasets/anon8231489123_ShareGPT_Vicuna_unfiltered_Qwen3-1.7B_GE2/test"
+  schedule: "tail"
+  train_data_portion: 0.95 # :p
+  test_data_portion: 0.95  # p:
+  pad_token_id: 151643
+  max_len: 2048
+  num_workers: 2
+
+train:
+  mixed_precision: "no" # "bf16"
+  bs: 2
+  lr: 1.0e-4
+  loss_method: "SmoothL1Loss"
+  gamma: null
+  do_clip: False
+  clip_max: 1.0e2
+  clip_min: -1.0e2
+  initialise_method: "kaiming"
+  is_warmup: True
+  num_epochs: 5
+  num_warmup_steps: 1000
+  total_steps: 95000
+  jcb_weight_reg: False
+  adp_weight_reg: False
+  jratio: 0.1
+  aratio: 1.0e-5
+  pratio: 0.2
+  vratio: 1.0
+  gradient_accumulation_steps: 1
+  grad_clip: 0.5
+  b1: 0.9
+  b2: 0.95
+  statepath: null
+  save_freq: 1
