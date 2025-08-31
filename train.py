@@ -1,8 +1,7 @@
 import os
 import gc
-import json
-import yaml
-from pathlib import Path
+import shutil
+from collections import defaultdict
 from tqdm import tqdm
 import wandb
 
@@ -12,31 +11,15 @@ from torch import nn, optim
 
 from transformers import get_linear_schedule_with_warmup
 from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 
-from tools.data_processing_v2 import JacobiDatasetV2, JacobiCollatorV2
-from tools.utils import top_accuracy, save_trainable_weights
+from configs.config import load_train_config 
 from models.tata import TaTa
-from configs.config import TDataCfg, TMetaCfg, TModelCfg, TrainCfg, TrainScriptConfig, to_obj     
-
-
-def load_config(path: str) -> TrainScriptConfig:
-    p = Path(path)
-    text = p.read_text()
-    if p.suffix.lower() in {".yaml", ".yml"}:
-        if yaml is None:
-            raise RuntimeError("PyYAML is not installed, but a YAML config was provided.")
-        obj = yaml.safe_load(text)
-    else:
-        obj = json.loads(text)
-
-    return TrainScriptConfig(
-        meta=to_obj(obj["meta"], TMetaCfg),
-        data=to_obj(obj["data"], TDataCfg),
-        model=to_obj(obj["model"], TModelCfg),
-        train=to_obj(obj["train"], TrainCfg),
-    )
+from tools.evaluation import WordCounter, Evaluator
+from tools.data_processing_v2 import JacobiDatasetV2, JacobiCollatorV2
+from tools.utils import save_trainable_weights
 
 
 class Criterion:
@@ -145,15 +128,6 @@ class Criterion:
 
 
 def load_model(tr_cfg):
-    # if tr_cfg.train.mixed_precision == "no":
-    #     torch_dtype = torch.float32
-    # elif tr_cfg.train.mixed_precision == "fp16":
-    #     torch_dtype = torch.float16
-    # elif tr_cfg.train.mixed_precision == "bf16":
-    #     torch_dtype = torch.bfloat16
-    # else:
-    #     raise NotImplementedError(f"unknown precision: {tr_cfg.train.mixed_precision}")
-
     model = TaTa(
         pretrained_model_name_or_path=tr_cfg.model.basepath,
         num_jacobi_tokens=tr_cfg.model.num_jacobi_tokens,
@@ -163,6 +137,7 @@ def load_model(tr_cfg):
         adapter_type=tr_cfg.model.adapter_type,
         shared_adapter=tr_cfg.model.shared_adapter,
         fuse_prev_hidden_states=tr_cfg.model.fuse_prev_hidden_states,
+        fuse_jacobi_with_prev_sample=tr_cfg.model.fuse_jacobi_with_prev_sample,
         shared_jacobi_token=tr_cfg.model.shared_jacobi_token,
         use_pre_layer_norm=tr_cfg.model.use_pre_layer_norm,
         jacobi_adapter_kwargs=tr_cfg.model.jacobi_adapter_kwargs,
@@ -170,23 +145,6 @@ def load_model(tr_cfg):
         precision=tr_cfg.train.mixed_precision
     )
 
-    # model = Qwen2JacobiForCausalLM.from_pretrained(
-    #     pretrained_model_name_or_path=tr_cfg.model.basepath,
-    #     num_jacobi_tokens=tr_cfg.model.num_jacobi_tokens,
-    #     num_prev_sequences=tr_cfg.model.num_prev_sequences,
-    #     token_sets_inline=tr_cfg.model.token_sets_inline,
-    #     adapter_insertion_freq=tr_cfg.model.adapter_insertion_freq,
-    #     adapter_type=tr_cfg.model.adapter_type,
-    #     shared_adapter=tr_cfg.model.shared_adapter,
-    #     fuse_prev_hidden_states=tr_cfg.model.fuse_prev_hidden_states,
-    #     shared_jacobi_token=tr_cfg.model.shared_jacobi_token,
-    #     use_pre_layer_norm=tr_cfg.model.use_pre_layer_norm,
-    #     jacobi_adapter_kwargs=tr_cfg.model.jacobi_adapter_kwargs,
-    #     torch_dtype=torch_dtype,
-    #     device_map="auto",
-    #     precision=tr_cfg.train.mixed_precision
-    # )
-    
     for name, p in model.named_parameters():
         if "jacobi" not in name:
             p.requires_grad = False
@@ -197,8 +155,6 @@ def load_model(tr_cfg):
         if param.requires_grad:   
             model.init_trainable_weights(name, param, initialise_method)
     
-
-    from collections import defaultdict
     ta = accelerator.unwrap_model(model) if "accelerator" in globals() else model
     by_dev = defaultdict(int)
     for n, p in ta.named_parameters():
@@ -219,7 +175,7 @@ CONFIG_PATH = './configs/train_cfg.yaml'
 
 set_seed(0)
 torch.backends.cuda.matmul.allow_tf32 = True
-tr_cfg = load_config(CONFIG_PATH) 
+tr_cfg = load_train_config(CONFIG_PATH) 
 
 accelerator = Accelerator(mixed_precision=tr_cfg.train.mixed_precision, gradient_accumulation_steps=tr_cfg.train.gradient_accumulation_steps)
 if accelerator.is_main_process:
@@ -238,7 +194,6 @@ traindataset = JacobiDatasetV2(
     jacobi_J=tr_cfg.model.num_jacobi_tokens, 
     schedule=tr_cfg.data.schedule, 
     pad_id=tr_cfg.data.pad_token_id, 
-    vocab_size=v_model,
     dtype=tr_cfg.train.mixed_precision
     )
 
@@ -247,8 +202,7 @@ testdataset = JacobiDatasetV2(
     jacobi_J=tr_cfg.model.num_jacobi_tokens, 
     schedule=tr_cfg.data.schedule, 
     pad_id=tr_cfg.data.pad_token_id, 
-    vocab_size=v_model,
-        dtype=tr_cfg.train.mixed_precision
+    dtype=tr_cfg.train.mixed_precision
     )
 
 train_loader = DataLoader(
@@ -304,88 +258,52 @@ is_warmup = tr_cfg.train.is_warmup
 num_jacobi_tokens = tr_cfg.model.num_jacobi_tokens
 debug_mode = tr_cfg.meta.debug_mode
 
-# if is_warmup:
-    # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=total_steps)
+# eval
+word_counter = WordCounter(
+    J=tr_cfg.model.num_jacobi_tokens, 
+    V=v_model, 
+    K=3, 
+    dev=model.device
+    ) if tr_cfg.eval.count_word_distribution else None
 
-#     model, optimizer, criterion, scheduler = accelerator.prepare(#, train_loader, test_loader = accelerator.prepare(
-#         model, optimizer, criterion, scheduler#, train_loader, test_loader
-#     )
-# else:
-#     model, optimizer, criterion  = accelerator.prepare(#, train_loader, test_loader = accelerator.prepare(
-#         model, optimizer, criterion#, train_loader, test_loader
-#     )
+evaluator = Evaluator(
+    J=tr_cfg.model.num_jacobi_tokens, 
+    K=3,
+    device=model.device
+)
 
 scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=total_steps)
 optimizer, scheduler = accelerator.prepare(optimizer, scheduler)
-
-# def print_hook_device_map(root):
-#     for name, m in root.named_modules():
-#         hk = getattr(m, "_hf_hook", None)
-#         if hk is not None and getattr(hk, "execution_device", None) is not None:
-#             print(f"{name} -> exec:{hk.execution_device}")
-
-# unwrapped = accelerator.unwrap_model(model)   # TaTa
-# print_hook_device_map(unwrapped)        # the Qwen2 backbone inside TaTa
 
 if tr_cfg.train.statepath is not None:
     # Load accelerator state
     print("Loading model, optimizer, and scheduler states in {tr_cfg['statepath']}")
     accelerator.load_state(tr_cfg.train.statepath)
-
-    # Restore random states
-    # random_state_file = os.path.join(tr_cfg["statepath"], "random_states_0.pkl")
-    # with open(random_state_file, "rb") as f:
-    #     random_states = pickle.load(f)
-
-    # torch.random.set_rng_state(random_states["torch"])
-    # torch.cuda.random.set_rng_state(random_states["cuda"])
-
     print("State restored successfully!")
 
-continuous_loss_nan = 0
 epoch_counts = []
 previous_data = []
 for epoch in range(num_epochs + 1):
-    top_3acc = [[0 for _ in range(num_jacobi_tokens)] for _ in range(3)]
-    correct = [0 for _ in range(num_jacobi_tokens)]
-    total = 0
+    evaluator.reset()
     epoch_loss = 0
     num_batches = 0
+    if word_counter is not None:
+        word_counter.initialize_new_count()
+    
     model.train()
-    counts = torch.zeros((num_jacobi_tokens, v_model), dtype=torch.int32, device=model.device)
     for batch_idx, data in enumerate(tqdm(train_loader)):
         with accelerator.accumulate(model):
             optimizer.zero_grad()
-            output = model(input_ids=data["input_ids"], 
-                            attention_mask=data["attention_mask"],
-                            loss_mask=data["loss_mask"],
-                            use_cache=False,
-                            output_hidden_states=True,
-                            return_dict=True)
+            output = model(
+                input_ids=data["input_ids"],
+                jacobi_inputs=data["jacobi_inputs"],
+                attention_mask=data["attention_mask"],
+                loss_mask=data["loss_mask"],
+                use_cache=False,
+                output_hidden_states=True,
+                return_dict=True
+                )
             
-            if torch.isnan(output['jacobi_hidden_states']).any():
-                continuous_loss_nan += 1
-                print(f"outputs contain nan : {data['filenames']}")
-                print(f"previous data : {previous_data}")
-                for name, param in model.named_parameters():
-                    if "model." in name:
-                        continue
-                    print(f"[{name}] contain nan: {torch.isnan(param).any()}")
-                    print(param.numel(), torch.abs(param).max(), torch.abs(param).min(), torch.abs(param).sum())
-
-                for i, tensor in enumerate(output['jacobi_all_hidden_states']):
-                    print(f"[layer {i}] contain nan: {torch.isnan(tensor).any()}")
-                    print(tensor.numel(), torch.abs(tensor).max(), torch.abs(tensor).min(), torch.abs(tensor).sum())
-
-                gc.collect()
-                torch.cuda.empty_cache()
-                optimizer.zero_grad()
-                if continuous_loss_nan >= 3:
-                    break
-                continue
-            continuous_loss_nan = max(0, continuous_loss_nan-1)
-            previous_data = data['filenames']
-
             with torch.no_grad():
                 tgt = data["hidden_state_target"]#.to(model.lm_head.weight.dtype)
                 target_head = model.lm_head(tgt)#.detach()
@@ -413,78 +331,9 @@ for epoch in range(num_epochs + 1):
                 print(f"attn_mask len and sum: {data['attention_mask'].shape}, {data['attention_mask'].sum()}")
                 print(f"loss_mask len and index: {data['loss_mask'].shape}, {torch.nonzero(data['loss_mask'][0] == 1, as_tuple=True)[0]}")
 
-            # --- Efficient top-K counting over jacobi logits (OOM-safe) ---
-            with torch.no_grad():
-                K = 3
-                logits = output['jacobi_logits']                 # [N, V]
-                dev = logits.device
-                N, V = logits.shape
-                T = num_jacobi_tokens                            # J
-
-                # Ensure counts matches the model head vocab size & device
-                if counts.device != dev or counts.size(0) != T or counts.size(1) != V:
-                    counts = torch.zeros((T, V), dtype=torch.int32, device=dev)
-
-                # Use a smaller working dtype just for topk’s temporary buffers if helpful
-                work_dtype = torch.float16 if logits.dtype == torch.float32 else logits.dtype
-
-                # Choose a chunk size based on free memory (fallback to a safe constant)
-                try:
-                    free_mem, _ = torch.cuda.mem_get_info(dev)
-                    bytes_per_row = V * (2 if work_dtype == torch.float16 else 4)
-                    rows_per_chunk = max(64, min(N, int(0.20 * free_mem // bytes_per_row)))
-                except Exception:
-                    rows_per_chunk = 512
-
-                row_ids = torch.arange(N, device=dev)
-
-                for s in range(0, N, rows_per_chunk):
-                    e = min(N, s + rows_per_chunk)
-                    rids = row_ids[s:e]                 # [R]
-                    token_ids = (rids % T)              # [R] → which Jacobi token each row belongs to
-
-                    # top-K indices only (no need for values; no full sort)
-                    topk_idx = torch.topk(
-                        logits[s:e].to(work_dtype), k=K, dim=-1, largest=True, sorted=False
-                    ).indices                           # [R, K]
-
-                    # In-place sparse accumulation: counts[token_ids, topk_idx] += 1
-                    counts.index_put_(
-                        (token_ids.repeat_interleave(K), topk_idx.reshape(-1)),
-                        torch.ones(topk_idx.numel(), dtype=counts.dtype, device=dev),
-                        accumulate=True
-                    )
+            if word_counter is not None:
+                word_counter.update_count(output['jacobi_logits'])
                     
-            # visualize
-            # if batch_idx % 1000 == 0:
-            #     target_ids = data['labels'].view(-1, num_jacobi_tokens)
-            #     target_jacobi_logits = target_head.view(-1, num_jacobi_tokens, target_head.shape[-1])
-            #     output_jacobi_logits = output['jacobi_logits'].view(-1, num_jacobi_tokens, output['jacobi_logits'].shape[-1])
-                
-            #     sample_counts = min(target_jacobi_logits.shape[0], 3)
-            #     group_nums = torch.randint(low=0, high=target_jacobi_logits.shape[0], size=(sample_counts,)).tolist()
-            #     for group_num in group_nums:
-            #         print(f"top_3 tokens of group {group_num}:")
-            #         for i, distribution in enumerate(output_jacobi_logits[group_num][:num_jacobi_tokens]):
-            #             top_3 = distribution.argsort(descending=True)[:3]
-            #             target_decode = tokenizer.decode(target_ids[group_num][i])
-            #             target_decode = target_decode.replace('\n', '\\n') if '\n' in target_decode else target_decode
-            #             report = f"<[{i}-Target]{target_decode}>, "
-            #             for idx, token in enumerate(top_3):
-            #                 decode = tokenizer.decode([token])
-            #                 decode = decode.replace('\n', '\\n') if '\n' in decode else decode
-            #                 report += f"<[{i}-{idx+1}]{decode}>, "
-            #             print(report)
-            #     top_5 = counts.argsort(dim=-1, descending=True)[:, :5]
-            #     report = f"[batch {batch_idx}] most freq predict tokens:\n"
-            #     for seq_id, seq_data in enumerate(top_5):
-            #         report += f"[token {seq_id}] "
-            #         for i, token in enumerate(seq_data):
-            #             decode = tokenizer.decode([token])
-            #             decode = decode.replace('\n', '\\n') if '\n' in decode else decode
-            #             report += f"<top {i+1}: {decode}({counts[seq_id, token]} times)>, "
-            #         report = report[:-2] + "\n"
-            #     print(report)
             loss = criterion.compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], output['jacobi_all_hidden_states'], model.jacobi_weight)
             accelerator.backward(loss)
             accelerator.clip_grad_value_(model.parameters(), tr_cfg.train.grad_clip)
@@ -493,42 +342,38 @@ for epoch in range(num_epochs + 1):
                 scheduler.step()
 
         with torch.no_grad():
-            _, predicted = torch.max(output['jacobi_logits'], -1)
-            _, target = torch.max(target_head, -1)
-            ct = predicted.shape[0] // num_jacobi_tokens
-            cc = (predicted == target) 
+            evaluator.to(output['jacobi_logits'].device)
+            evaluator.update(output['jacobi_logits'], target_head)
 
-            topkacc = top_accuracy(output['jacobi_logits'], target, num_jacobi_tokens, (1, 2, 3))
-            for i, cor_seq in enumerate(topkacc):
-                cor_seq = cor_seq.view(-1, num_jacobi_tokens)
-                cor_seq = cor_seq.sum(0)
-                for seq_id in range(len(cor_seq)):
-                    top_3acc[i][seq_id] += topkacc[i][seq_id]
-            total += ct
-
-        if accelerator.is_main_process and ct != 0:
-            logdict = {"train/lr": optimizer.optimizer.param_groups[0]["lr"], "train/vloss": criterion.vloss,
-                       "train/ploss": criterion.ploss, "train/rloss": criterion.adp_reg, "train/hloss": criterion.jcb_reg, "train/loss": loss.item(), "train/acc": cc / ct}
-            for id, i in enumerate(top_3acc):
-                for seq in range(len(i)):
-                    logdict[f'train/top_{id + 1}_token_{seq}_acc'] = top_3acc[id][seq].item() / total
+        if accelerator.is_main_process:
+            logdict = {
+                "train/lr": optimizer.optimizer.param_groups[0]["lr"], 
+                "train/vloss": criterion.vloss,
+                "train/ploss": criterion.ploss, 
+                "train/rloss": criterion.adp_reg, 
+                "train/hloss": criterion.jcb_reg, 
+                "train/loss": loss.item()
+                }
+            
+            kj_matrix = evaluator.compute_K_accuracy()
+            j_alpha = evaluator.compute_aplha()
+            for kid, km in enumerate(kj_matrix):
+                for jid, j in enumerate(km):
+                    logdict[f'train/top_{kid + 1}_token_{jid}_acc'] = j
+            for jid, j in enumerate(j_alpha):
+                logdict[f'train/alpha_token_{jid}'] = j
             wandb.log(logdict)
 
-        del target_head
+        del output, target_head
         gc.collect()
         torch.cuda.empty_cache()
 
         epoch_loss += loss.item()
         num_batches += 1
 
-        if debug_mode and batch_idx % 500 == 0:
-            print(torch.cuda.memory_summary(device='cuda', abbreviated=True), flush=True)
-    
-    if continuous_loss_nan >= 3:
-        accelerator.save_state(output_dir=f"{tr_cfg.meta.cpdir}/{tr_cfg.meta.name}/state_{epoch}_abnormal")
-        break
+    if word_counter is not None:
+        word_counter.append_curr_count()
 
-    epoch_counts.append(counts)
     epoch_loss /= num_batches
     if accelerator.is_local_main_process:
         print('Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
@@ -536,16 +381,16 @@ for epoch in range(num_epochs + 1):
 
     # evaluation
     if (epoch ) % tr_cfg.train.save_freq == 0:
-        top_3acc = [[0 for _ in range(tr_cfg.model.num_jacobi_tokens)] for _ in range(3)]
-        correct = [0 for _ in range(tr_cfg.model.num_jacobi_tokens)]
-        total = 0
+        evaluator.reset()
         epoch_loss = 0
         num_batches = 0
+
         model.eval()
         with torch.no_grad():
             for batch_idx, data in enumerate(tqdm(test_loader)):
                 output = model(
                     input_ids=data["input_ids"], 
+                    jacobi_inputs=data["jacobi_inputs"],
                     attention_mask=data["attention_mask"],
                     loss_mask=data["loss_mask"],
                     use_cache=False,
@@ -558,24 +403,24 @@ for epoch in range(num_epochs + 1):
 
                 loss = criterion.compute_loss(data["hidden_state_target"], target_head, output['jacobi_hidden_states'], output['jacobi_logits'], output['jacobi_all_hidden_states'], model.jacobi_weight)
             
-                _, predicted = torch.max(output['jacobi_logits'], -1)
-                _, target = torch.max(target_head, -1)
-                ct = predicted.shape[0] // num_jacobi_tokens
-                cc = (predicted == target) 
+                evaluator.to(output['jacobi_logits'].device)
+                evaluator.update(output['jacobi_logits'], target_head)
 
-                topkacc = top_accuracy(output['jacobi_logits'], target, num_jacobi_tokens, (1, 2, 3))
-                for i, cor_seq in enumerate(topkacc):
-                    cor_seq = cor_seq.view(-1, num_jacobi_tokens)
-                    cor_seq = cor_seq.sum(0)
-                    for seq_id in range(len(cor_seq)):
-                        top_3acc[i][seq_id] += topkacc[i][seq_id]
-                total += ct
-
-            if accelerator.is_main_process and ct != 0:
-                logdict = {"test/vloss": criterion.vloss, "test/ploss": criterion.ploss, "test/rloss": criterion.adp_reg, "test/hloss": criterion.jcb_reg, "test/loss": loss.item(), "test/acc": cc / ct}
-            for id, i in enumerate(top_3acc):
-                for seq in range(len(i)):
-                    logdict[f'test/top_{id + 1}_token_{seq}_acc'] = top_3acc[id][seq].item() / total
+            if accelerator.is_main_process:
+                logdict = {
+                    "test/vloss": criterion.vloss, 
+                    "test/ploss": criterion.ploss, 
+                    "test/rloss": criterion.adp_reg, 
+                    "test/hloss": criterion.jcb_reg, 
+                    "test/loss": loss.item()
+                    }
+            kj_matrix = evaluator.compute_K_accuracy()
+            j_alpha = evaluator.compute_aplha()
+            for kid, km in enumerate(kj_matrix):
+                for jid, j in enumerate(km):
+                    logdict[f'test/top_{kid + 1}_token_{jid}_acc'] = j
+            for jid, j in enumerate(j_alpha):
+                logdict[f'test/alpha_token_{jid}'] = j
             wandb.log(logdict)
 
         epoch_loss += loss.item()
@@ -589,8 +434,11 @@ for epoch in range(num_epochs + 1):
         if accelerator.is_local_main_process:
             print('Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, num_epochs, epoch_loss))
             wandb.log({"test/epochloss": epoch_loss})
-            output_dir=f"{tr_cfg.meta.cpdir}/{tr_cfg.meta.name}/state_{epoch}"
+            base = f"{tr_cfg.meta.cpdir}/{tr_cfg.meta.name}"
+            output_dir=f"{base}/state_{epoch}"
             save_trainable_weights(model, f"{output_dir}/model_weight.pt")
             # accelerator.save_state(output_dir=output_dir)
+            if not os.path.exists(f"{base}/train_cfg.yaml"):
+                shutil.copyfile(CONFIG_PATH, f"{base}/train_cfg.yaml")
 
-torch.save(torch.stack(epoch_counts, dim=0), f"{tr_cfg.meta.cpdir}/{tr_cfg.meta.name}epoch_counts.pt")
+word_counter.save(f"{tr_cfg.meta.cpdir}/{tr_cfg.meta.name}epoch_counts.pt")

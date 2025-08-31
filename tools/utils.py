@@ -145,37 +145,6 @@ def _time(tag: str, fn: Callable, **kwargs):
 # Metrics / utilities
 # -------------------------------------------------------------------
 
-@torch.no_grad()
-def top_accuracy(
-    output: torch.Tensor,
-    target: torch.Tensor,
-    jacobi_token_nums: int,
-    topk: Tuple[int, ...] = (1,)
-) -> List[torch.Tensor]:
-    """
-    Computes top-k accuracy per Jacobi position and sums across groups.
-    output: [N, V] or [N, J, V]  (will be reshaped to [-1, J, V])
-    target: [N] or [N, J]        (will be reshaped to [-1, J])
-    Returns a list of tensors, one per k in topk, each shape [J] = per-position correct counts.
-    """
-    if output.dim() == 2:
-        output = output.view(-1, jacobi_token_nums, output.shape[-1])
-    if target.dim() == 1:
-        target = target.view(-1, jacobi_token_nums)
-
-    maxk = max(topk)
-    # [B, J, maxk]
-    _, pred = output.topk(maxk, dim=-1, largest=True, sorted=True)
-    # broadcast target -> [B, J, maxk]
-    tgt = target.unsqueeze(-1).expand_as(pred)
-    correct = (pred == tgt).to(torch.float32)
-
-    res = []
-    for k in topk:
-        # sum over batch, keep per-position across J
-        res.append(correct[..., :k].sum(dim=0).sum(dim=-1))  # [J]
-    return res
-
 
 def output_abnormal_message(
     target_p: torch.Tensor,
@@ -197,26 +166,69 @@ def output_abnormal_message(
     return "\n".join(lines)
 
 
+import os
+import torch
+from typing import Tuple, List
+
+try:
+    from safetensors import safe_open
+    HAVE_SAFETENSORS = True
+except Exception:
+    HAVE_SAFETENSORS = False
+
 @torch.no_grad()
 def load_jacobi_weight(model: torch.nn.Module, ckpt_path: str) -> None:
     """
-    Load jacobi-specific parameters from a .safetensors file.
-    Skips backbone params (names starting with 'model.').
+    Load only 'jacobi' parameters from a checkpoint.
+    Supports:
+      - Safetensors: .safetensors (streamed)
+      - PyTorch: .pt / .bin (full read into CPU RAM)
     """
-    missing, mismatched = [], []
+    ext = os.path.splitext(ckpt_path)[1].lower()
+    missing: List[str] = []
+    mismatched: List[Tuple[str, tuple, tuple]] = []
     loaded = 0
-    with safe_open(ckpt_path, framework="pt") as f:
-        keys = set(f.keys())
+
+    if ext == ".safetensors":
+        if not HAVE_SAFETENSORS:
+            raise RuntimeError("safetensors is not installed.")
+        # stream keys without loading all tensors
+        with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+            keyset = set(f.keys())
+            for name, param in model.named_parameters():
+                if "jacobi" not in name:
+                    continue
+                if name not in keyset:
+                    missing.append(name); continue
+                t = f.get_tensor(name)  # already on CPU
+                if t.shape != param.shape:
+                    mismatched.append((name, tuple(param.shape), tuple(t.shape))); continue
+                param.data.copy_(t.to(device=param.device, dtype=param.dtype))
+                loaded += 1
+
+    else:
+        # PyTorch checkpoint
+        # NOTE: weights_only=True (PyTorch >=2.4); fall back if not available
+        try:
+            sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)  # type: ignore
+        except TypeError:
+            sd = torch.load(ckpt_path, map_location="cpu")
+
+        # Some checkpoints store under 'state_dict'
+        if isinstance(sd, dict) and "state_dict" in sd and isinstance(sd["state_dict"], dict):
+            sd = sd["state_dict"]
+
+        if not isinstance(sd, dict):
+            raise ValueError("Checkpoint is not a state_dict-like mapping.")
+
         for name, param in model.named_parameters():
-            if name.startswith("model."):
+            if "jacobi" not in name:
                 continue
-            if name not in keys:
-                missing.append(name)
-                continue
-            t = f.get_slice(name)[:]
+            if name not in sd:
+                missing.append(name); continue
+            t = sd[name]
             if t.shape != param.shape:
-                mismatched.append((name, tuple(param.shape), tuple(t.shape)))
-                continue
+                mismatched.append((name, tuple(param.shape), tuple(t.shape))); continue
             param.data.copy_(t.to(device=param.device, dtype=param.dtype))
             loaded += 1
 
@@ -227,8 +239,8 @@ def load_jacobi_weight(model: torch.nn.Module, ckpt_path: str) -> None:
     if mismatched:
         ex = ", ".join([f"{n} exp{es} got{gs}" for n, es, gs in mismatched[:3]])
         print(f"[load_jacobi_weight] mismatched shapes: {len(mismatched)} ({ex})")
-    if not missing and not mismatched:
-        print("[load_jacobi_weight] all parameters loaded.")
+    if not missing and not mismatched and loaded > 0:
+        print("[load_jacobi_weight] all jacobi parameters loaded.")
 
 
 def _exec_device(mod: nn.Module) -> torch.device:

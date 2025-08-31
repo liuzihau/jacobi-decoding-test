@@ -2,23 +2,18 @@ from typing import Tuple, List, Optional, Union
 import torch
 from torch import nn
 import torch.nn.functional as F
-from transformers.modeling_utils import PreTrainedModel
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM, Qwen2RMSNorm
-from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM, Qwen3RMSNorm
+from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.generation.logits_process import (
-    LogitsProcessorList,
-    RepetitionPenaltyLogitsProcessor,
-    TemperatureLogitsWarper,
-    TopKLogitsWarper,
-    TopPLogitsWarper,
-)
 
 from models.datatype import JacobiCausalLMOutputWithPast
 from models.adapter import Qwen2AdapterMLP, EnhancedQwen2MLP, BasicLinear
 
-from tools.tree_structure import TreeStructure, InputProcessor
+# from tools.tree_structure import TreeStructure, InputProcessor
+from tools.tree_structure_v2 import BatchedBeamTree
+from tools.input_processor import InputProcessor
+from tools.verification import verify_routes, update_kv_cache
 from tools.utils import timer, _time, _exec_device
 
 
@@ -55,9 +50,11 @@ class TaTa(nn.Module):
         jacobi_adapter_kwargs: dict | None = None,
         use_pre_layer_norm: bool = False,
         token_sets_inline: bool = True,
+        fuse_jacobi_with_prev_sample: bool = True,
         decoding_mode: str = "jacobi",
         device_map="auto",
-        precision: str = "fp16"
+        precision: str = "fp16",
+        pad_token_id: int = 0 
     ):
         # --- config & backbone ---
         super().__init__()
@@ -71,9 +68,13 @@ class TaTa(nn.Module):
             torch_dtype = torch.bfloat16
         else:
             raise NotImplementedError(f"Unknown precision type: {precision}")
+        
+        # --- basic information ---
+        self.pad_token_id = pad_token_id
 
         # --- basic backbone / lm head ---
         causal = self._load_model(pretrained_model_name_or_path, torch_dtype, device_map)
+        # self.causal = causal
         self.model = causal.model # backbone
         self.lm_head = causal.lm_head # output head 
         self.vocab_size = causal.vocab_size
@@ -101,8 +102,6 @@ class TaTa(nn.Module):
         # --- jacobi token embedding(s) ---
         self.jacobi_weight = self._init_jacobi_token(hidden_size, torch_dtype)
 
-
-        
         # --- adapter nums ---
         num_layers = len(self.model.layers)
         num_adapters = num_layers // self.adapter_insertion_freq if not self.shared_adapter else 1
@@ -144,7 +143,13 @@ class TaTa(nn.Module):
                 adp.to(dev)
                 slot = slot + 1 if not self.shared_adapter else slot
 
-        
+        # --- fuser ---
+        # given a previous sampled tokens
+        self.fuser = nn.Linear(2 * hidden_size, hidden_size) if fuse_jacobi_with_prev_sample else None
+        self.model.add_module("jacobi_fuser", self.fuser)
+        dev = _exec_device(self.lm_head)
+        self.fuser.to(dev)
+
     def _load_model(
             self, 
             pretrained_model_name_or_path: str,
@@ -188,29 +193,6 @@ class TaTa(nn.Module):
         
         adapter_cls = adapter_map[adapter_type]
         return adapter_cls(in_features, out_features, **jacobi_adapter_kwargs).to(dtype=torch_dtype)
-    
-    # def _build_adapters(
-    #     self,
-    #     *,
-    #     adapter_type: str,
-    #     num_layers: int,
-    #     in_features: int,
-    #     out_features: int,
-    #     jacobi_adapter_kwargs: dict,
-    # ):
-    #     """Create shared or per-slot adapters."""
-    #     adapter_map = {
-    #         "Linear": ProjectionLinear,
-    #         "Qwen2MLP": ProjectionQwen2AdapterMLP,
-    #         "EnhancedQwen2MLP": ProjectionEnhancedQwen2MLP,
-    #     }
-    #     if adapter_type not in adapter_map:
-    #         raise NotImplementedError(f"Unknown adapter_type: {adapter_type}")
-
-    #     adapter_cls = adapter_map[adapter_type]
-    #     # Number of adapter slots: 1 when shared, else one per adapter_insertion_freq slot across layers.
-    #     num_slots = 1 if self.shared_adapter else max(1, num_layers // self.adapter_insertion_freq)
-    #     return adapter_cls(in_features, out_features, layers=num_slots, **jacobi_adapter_kwargs)
 
     def _init_jacobi_token(self, hidden_size: int, torch_dtype: torch.dtype) -> nn.Parameter:
         """
@@ -228,7 +210,7 @@ class TaTa(nn.Module):
 
     def init_trainable_weights(self, name, param, method='kaiming'):
         std = self.model.config.initializer_range
-        if 'proj.weight' in name:
+        if 'proj.weight' in name or "fuser.weight" in name:
             if method == 'xavier':
                 nn.init.xavier_uniform_(param)
             elif method == 'kaiming':
@@ -259,6 +241,7 @@ class TaTa(nn.Module):
 
     def get_decoder(self):
         return self.model
+
 
     def merge_jacobi_tokens(self, inputs_embeds: torch.Tensor, loss_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -339,9 +322,14 @@ class TaTa(nn.Module):
                         if groups == 0:
                             continue
                         pos_b = pos_b[: groups * J].view(groups, J)                     # [G, J]
-                        prev_idx = pos_b[:, 0] - 1                                       # [G]
-                        prev_norm_pos = norm_running[b, prev_idx]                         # [G]
-                        offsets = prev_norm_pos.unsqueeze(1) + arange_J.unsqueeze(0)     # [G, J]
+                        
+                        if self.token_sets_inline:
+                            prev_idx = pos_b[:, 0] - 1                                  # [G]
+                        else:
+                            prev_idx = pos_b[:, 0] - groups
+                        
+                        prev_norm_pos = norm_running[b, prev_idx]                       # [G]
+                        offsets = prev_norm_pos.unsqueeze(1) + arange_J.unsqueeze(0)    # [G, J]
                         cache_position[b, pos_b] = offsets
         else:
             # user-supplied cache_position; ensure long dtype
@@ -385,6 +373,7 @@ class TaTa(nn.Module):
         for b in range(B):
             # jacobi positions for this sample
             jac_pos = torch.nonzero(loss_mask[b] == 1, as_tuple=False).flatten()   # [G*J]
+            jac_pos = jac_pos.to(device)   # [G*J]
             if jac_pos.numel() == 0:
                 continue
 
@@ -438,6 +427,25 @@ class TaTa(nn.Module):
 
         # reshape to [B*G, J, (M+1)*H]
         return curr_states.contiguous()
+
+    def find_tokens_split(self, input_ids: torch.Tensor, loss_mask: torch.Tensor) -> torch.Tensor:
+        B, L = input_ids.shape
+        J = int(self.num_jacobi_tokens)
+
+        out_chunks = []
+        device = input_ids.device
+
+        for b in range(B):
+            # Locate jacobi positions and form groups [G, J]
+            jac_pos = torch.nonzero(loss_mask[b] == 1, as_tuple=False).flatten()
+            jac_pos = jac_pos.to(device)
+            if jac_pos.numel() == 0:
+                continue
+
+            G = jac_pos.numel() // J
+            if G == 0:
+                continue
+            jac_pos = jac_pos[: G * J].view(G, J)  # [G, J], contiguous groups
 
     def cat_tokens_split(self, hidden_states: torch.Tensor, loss_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -518,9 +526,7 @@ class TaTa(nn.Module):
         # Final shape: [B*G, J, (M+1)*H]
         return curr_states.contiguous()
 
-
-
-    def cat_tokens_with_index(self, hidden_states: torch.Tensor, cat_indices: torch.Tensor) -> torch.Tensor:
+    def cat_tokens_with_index(self, hidden_states: torch.Tensor, cat_indices: torch.Tensor, jacobi_indices: torch.Tensor) -> torch.Tensor:
         """ [Inference]
         Gather & concatenate prior states for Jacobi adapters using precomputed indices.
 
@@ -539,27 +545,12 @@ class TaTa(nn.Module):
         B, L, H = hidden_states.shape
         B2, S, M = cat_indices.shape
         assert B == B2, f"Batch mismatch: hidden_states={B}, cat_indices={B2}"
-        J = int(self.num_jacobi_tokens)
-        assert S % J == 0, f"S ({S}) must be divisible by J ({J})"
-        G = S // J
 
-        # Handle optional negative indices (padding) by clamping then zeroing those slices
-        has_neg = (cat_indices < 0).any()
-        safe_idx = cat_indices.clamp_min(0).unsqueeze(-1).expand(-1, -1, -1, H)  # [B, S, M, H]
-
-        # Gather in one go: [B, S, M, H]
-        gathered = hidden_states.gather(dim=1, index=safe_idx)
-
-        if has_neg:
-            # zero out positions that were padded (idx < 0)
-            valid = (cat_indices >= 0).unsqueeze(-1)                              # [B, S, M, 1]
-            gathered = torch.where(valid, gathered, torch.zeros_like(gathered))
-
-        # Collapse mix dimension into features: [B, S, M*H]
-        gathered = gathered.view(B, S, M * H)
-
-        # Group S rows into (G, J): [B, G, J, M*H] -> [B*G, J, M*H]
-        curr_states = gathered.view(B, G, J, M * H).reshape(B * G, J, M * H)
+        cat_indices = cat_indices.expand(-1, -1, H).to(hidden_states.device)
+        gathered_prev = hidden_states.gather(dim=1, index=cat_indices)
+        b_idx, j_idx = jacobi_indices.to(hidden_states.device)
+        gathered_jac = hidden_states[b_idx, j_idx].view(gathered_prev.shape)
+        curr_states = torch.cat([gathered_jac, gathered_prev], dim=-1)
 
         return curr_states.contiguous()
     
@@ -570,6 +561,7 @@ class TaTa(nn.Module):
         attention_mask: Optional[torch.Tensor],
         past_seen_tokens: int,
         loss_mask: Optional[torch.Tensor],
+        jacobi_indices: Tuple[torch.Tensor, torch.Tensor],
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
@@ -602,54 +594,48 @@ class TaTa(nn.Module):
 
         # -------- B) Build [B, L, L] additive mask --------
         L = target_length
-        ar = torch.arange(L, device=device)
+        J = int(self.num_jacobi_tokens)
+
         # base causal deny: True where j > i
+        ar = torch.arange(L, device=device)
         deny = (ar > ar.view(-1, 1)).unsqueeze(0).expand(bs, -1, -1)  # [B, L, L] bool
 
-        if loss_mask is None or not torch.any(loss_mask == 1):
+        if J <= 0 or loss_mask is None or not torch.any(loss_mask == 1):
             # no jacobi columns → just causal
-            return torch.where(deny,
-                            torch.tensor(min_dtype, dtype=dtype, device=device),
-                            torch.tensor(0, dtype=dtype, device=device))
-
-        J = int(self.num_jacobi_tokens)
-        if J <= 0:
-            # safety
-            return torch.where(deny,
-                            torch.tensor(min_dtype, dtype=dtype, device=device),
-                            torch.tensor(0, dtype=dtype, device=device))
-
+            return torch.where(
+                deny,
+                torch.tensor(min_dtype, dtype=dtype, device=device),
+                torch.tensor(0, dtype=dtype, device=device)
+                )
+        
         if not self.token_sets_inline:
             raise NotImplementedError("Currently only can handle jacobi tokens insert inline situation")
         
         # column-wise jacobi mask C: mask all jacobi columns for all rows
-        # C[b, i, j] = (loss_mask[b, j] == 1)
-        C = loss_mask.to(torch.bool).unsqueeze(1).expand(-1, L, -1).clone()  # [B, L, L] bool
-
-        # for each batch, locate jacobi positions and clear their own group blocks
-        # groups must be contiguous blocks of length J
-        for b in range(bs):
-            jac_cols = torch.nonzero(loss_mask[b] == 1, as_tuple=False).flatten()  # [G*J]
-            if jac_cols.numel() == 0:
-                continue
-            # ensure complete groups
-            num_groups = jac_cols.numel() // J
-            if num_groups == 0:
-                continue
-            jac_cols = jac_cols[: num_groups * J].view(num_groups, J)  # [G, J]
-            # zero out C inside each J×J block
-            for g in range(num_groups):
-                s = jac_cols[g, 0].item()
-                e = s + J  # exclusive
-                C[b, s:e, s:e] = False
+        C = loss_mask.clone().to(dtype=torch.bool, device=device).unsqueeze(1).expand(-1, L, -1)  # [B, L, L] bool
+        jac_b_idx, jac_l_idx = jacobi_indices
+        first_jac_b_idx = jac_b_idx[:, 0]
+        first_jac_l_idx = jac_l_idx[:, 0]
+        for b, s in zip(first_jac_b_idx, first_jac_l_idx):
+            e = s + J  # exclusive
+            C[b, s:e, s:e] = False
 
         # final deny = causal upper OR jacobi column mask
         deny = deny | C
-        return torch.where(
+        attention_mask = torch.where(
             deny,
             torch.tensor(min_dtype, dtype=dtype, device=device),
             torch.tensor(0, dtype=dtype, device=device),
-        )
+            )
+        attention_mask = attention_mask[:, None, :, :]
+        if past_seen_tokens > 0:
+            B, H, Q, K_now = attention_mask.shape
+            pad = torch.zeros((B, H, Q, past_seen_tokens), dtype=attention_mask.dtype, device=device)
+            attention_mask = torch.cat([pad, attention_mask], dim=-1)
+
+        # print(attention_mask)
+        # raise Exception("force exit")
+        return attention_mask
 
     def update_hidden_states(
         self,
@@ -658,45 +644,50 @@ class TaTa(nn.Module):
         loss_mask: torch.Tensor,       # [B, L]
         jacobi_indices: Optional[torch.Tensor] = None,
     ) -> None:
+        
+        if jacobi_indices is None:
+            jac_b_idx, jac_l_idx = torch.nonzero(loss_mask == 1, as_tuple=True)
+        else:
+            jac_b_idx, jac_l_idx = jacobi_indices
+        
         # Anchor device to the tensor owned by this layer shard
+        _, _, H = hidden_states.shape
         device = hidden_states.device
 
         # Move all inputs that will be used in indexing/assignment
-        new_states   = new_states.to(device, non_blocking=True)
-        loss_mask    = loss_mask.to(device, non_blocking=True)
-        if jacobi_indices is not None:
-            jacobi_indices = jacobi_indices.to(device, non_blocking=True)
-
+        new_states = new_states.to(device, non_blocking=True)
+        loss_mask = loss_mask.to(device, non_blocking=True)
+        jac_b_idx = jac_b_idx.view(-1).to(device)
+        jac_l_idx = jac_l_idx.view(-1).to(device)
+        
         # (Optional) ensure contiguous for safety/perf
         hidden_states = hidden_states.contiguous()
-        new_states    = new_states.contiguous()
+        new_states = new_states.contiguous()
 
-        B, L, H = hidden_states.shape
-        J = int(self.num_jacobi_tokens)
+        hidden_states[(jac_b_idx, jac_l_idx)] = new_states.reshape(-1, H)
 
-        ptr = 0
-        for b in range(B):
-            if jacobi_indices is not None:
-                idx = jacobi_indices[b]
-            else:
-                idx = torch.nonzero(loss_mask[b] == 1, as_tuple=False).flatten()
+        # ptr = 0
+        # for b in range(B):
+        #     if jacobi_indices is not None:
+        #         idx = jacobi_indices[b]
+        #     else:
+        #         idx = torch.nonzero(loss_mask[b] == 1, as_tuple=False).flatten()
 
-            if idx.numel() == 0:
-                continue
+        #     if idx.numel() == 0:
+        #         continue
 
-            G = idx.numel() // J
-            if G == 0:
-                continue
+        #     G = idx.numel() // J
+        #     if G == 0:
+        #         continue
 
-            chunk = new_states[ptr: ptr + G]  # [G, J, H]
-            ptr += G
+        #     chunk = new_states[ptr: ptr + G]  # [G, J, H]
+        #     ptr += G
 
-            # Make sure idx is on the same device and do the write
-            idx = idx.to(device, non_blocking=True)
-            hidden_states[b, idx] = chunk.reshape(G * J, H)
-            # or: hidden_states[b].index_copy_(0, idx, chunk.reshape(G*J, H))
-
-            
+        #     # Make sure idx is on the same device and do the write
+        #     idx = idx.to(device, non_blocking=True)
+        #     hidden_states[b, idx] = chunk.reshape(G * J, H)
+        #     # or: hidden_states[b].index_copy_(0, idx, chunk.reshape(G*J, H))
+          
     def forward_backbone_decoder_layer(
         self,
         decoder_layer,
@@ -783,7 +774,13 @@ class TaTa(nn.Module):
             # gather/concat jacobi token rows
             if cat_indices is not None:
                 # fast path: dataset precomputed gather indices
-                curr_states = _time("cat_tokens", self.cat_tokens_with_index, hidden_states=used_states, cat_indices=cat_indices)
+                curr_states = _time(
+                    "cat_tokens", 
+                    self.cat_tokens_with_index, 
+                    hidden_states=used_states,
+                    cat_indices=cat_indices,
+                    jacobi_indices=jacobi_indices
+                    )
             else:
                 # fallback paths (keep behavior)
                 if self.token_sets_inline:
@@ -799,7 +796,12 @@ class TaTa(nn.Module):
             curr_states = decoder_layer.pre_adapter_layernorm(curr_states) if self.use_pre_layer_norm else curr_states
 
             # run adapter(s) and write back into jacobi rows
-            new_states = _time("adapters", decoder_layer.jacobi_adapter, hidden_state=curr_states)#, idx=adapter_idx)
+            new_states = _time(
+                "adapters", 
+                decoder_layer.jacobi_adapter, 
+                hidden_state=curr_states
+                )
+            
             _time(
                 "update_hidden_states",
                 self.update_hidden_states,
@@ -813,10 +815,9 @@ class TaTa(nn.Module):
         outputs = (hidden_states,)
         # if output_attentions:
         #     outputs += (self_attn_weights,)
-        if use_cache:
-            outputs += (present_key_value,)
+        # if use_cache:
+        #     outputs += (present_key_value,)
         return outputs
-
 
     def forward_backbone_decoder_layers(
         self,
@@ -868,13 +869,12 @@ class TaTa(nn.Module):
                 cat_indices=cat_indices,
                 all_hidden_states=hidden_col,  # keeps your original signature; not used for data, just passthrough
             )
-
             # layer_outputs follows HF convention:
             # 0: hidden_states, 1: present_key_values (depends on output_attentions)
             hidden_states = layer_outputs[0]
 
-            if use_cache:
-                next_decoder_cache = layer_outputs[1]
+            # if use_cache:
+            #     next_decoder_cache = layer_outputs[1]
 
             # if collect_a:
             #     attn_col.append(layer_outputs[1])
@@ -890,8 +890,7 @@ class TaTa(nn.Module):
         all_hidden_states = tuple(hidden_col) if collect_h else None
         # all_self_attns = tuple(attn_col) if collect_a else None
 
-        return hidden_states, all_hidden_states, next_decoder_cache#, all_self_attns
-
+        return hidden_states, all_hidden_states
 
     def forward_backbone_model(
         self,
@@ -918,14 +917,6 @@ class TaTa(nn.Module):
         # -------- 2) token embeddings (+Jacobi merge) --------
         if inputs_embeds is None:
             inputs_embeds = self.model.embed_tokens(input_ids)
-            # w = self.model.embed_tokens.weight
-            # pad = self.model.embed_tokens.padding_idx
-
-            # # force ids to the weight's device and proper dtype/contiguity
-            # ids = input_ids.to(device=w.device, dtype=torch.long, non_blocking=True).contiguous()
-
-            # inputs_embeds = F.embedding(ids, w, padding_idx=pad)
-
 
         if loss_mask is not None:
             inputs_embeds = _time(
@@ -961,12 +952,13 @@ class TaTa(nn.Module):
             attention_mask=attention_mask,
             past_seen_tokens=past_seen_tokens,
             loss_mask=loss_mask,
+            jacobi_indices=jacobi_indices,
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
 
         # -------- 6) decoder stack --------
-        hidden_states, all_hidden_states, next_decoder_cache = self.forward_backbone_decoder_layers(
+        hidden_states, all_hidden_states = self.forward_backbone_decoder_layers(
             hidden_states=hidden_states,
             causal_mask=causal_mask,
             loss_mask=loss_mask,
@@ -980,11 +972,9 @@ class TaTa(nn.Module):
             jacobi_indices=jacobi_indices,
             cat_indices=cat_indices,
         )
-
+        
         # -------- 7) package outputs --------
-        next_cache = next_decoder_cache if use_cache else None
-        if next_cache is not None:# and return_legacy_cache:
-            next_cache = next_cache.to_legacy_cache()
+        next_cache = past_key_values if use_cache else None
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -992,6 +982,22 @@ class TaTa(nn.Module):
             hidden_states=all_hidden_states,
             # attentions=all_self_attns,
         )
+
+    def fuse_forward(
+            self,
+            input_ids,
+            jacobi_hidden_states
+    ) -> torch.Tensor:
+        if self.fuser is None:
+            raise NotImplementedError("currently we need a fuser")
+        input_ids = input_ids.long()
+        emb_inputs = self.model.embed_tokens(input_ids)
+        emb_inputs = emb_inputs.to(self.fuser.weight.device)
+        jacobi_hidden_states = jacobi_hidden_states.to(self.fuser.weight.device)
+        jacobi_hidden_states = torch.cat([emb_inputs, jacobi_hidden_states], dim=-1)  #[B * G, 2H]
+        jacobi_hidden_states = self.fuser(jacobi_hidden_states)
+        jacobi_logits = self.lm_head(jacobi_hidden_states)
+        return jacobi_logits
 
     def forward(
         self,
@@ -1006,7 +1012,9 @@ class TaTa(nn.Module):
         # output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        jacobi_inputs:  Optional[torch.Tensor] = None,   # training only, if we have sampler
         jacobi_indices: Optional[torch.Tensor] = None,   # kept for interface; not required here
+        prev_indices: Optional[torch.Tensor] = None,
         cat_indices: Optional[torch.Tensor] = None,      # kept for interface; used in backbone
         num_logits_to_keep: int = 0,
         inference: bool = False,
@@ -1044,58 +1052,64 @@ class TaTa(nn.Module):
             )
 
             hidden_states = outputs[0]                     # [B, L, H]
-            logits = self.lm_head(hidden_states)          # [B, L, V]  (cheap)
 
             # ----- jacobi side-outputs only when training -----
             jacobi_logits = None
             jacobi_hidden_states = None
             jacobi_all_hidden_states = None
 
+            flat_idx = loss_mask.reshape(-1).to(dtype=torch.bool).nonzero(as_tuple=True)[0]  # device follows loss_mask
+
+            # --- get jacobi hidden states ---
+            B, L, H = hidden_states.shape
+
+            # --- training mode ---
             if not inference and loss_mask is not None:
-                # Build a single boolean mask over the flattened [B*L] dimension
-                dev_ref = logits.device
-
-                B, L, H = hidden_states.shape
-                V = logits.size(-1)
-
-                # 1) Build flat indices ON THE CURRENT DEVICE OF loss_mask, then move idx only
-                flat_idx = loss_mask.reshape(-1).to(dtype=torch.bool).nonzero(as_tuple=True)[0]  # device follows loss_mask
-                # Keep a CPU copy only if you’ll reuse across many devices/layers; optional:
-                # flat_idx_cpu = flat_idx.detach().to('cpu')
-
-                # 2) Gather on each source’s device, then move small results to dev_ref
-
-                # hidden states -> [N, H]
                 idx_h = flat_idx.to(hidden_states.device, non_blocking=True)
                 jacobi_hidden_states = hidden_states.reshape(B * L, H).index_select(0, idx_h)
-                if jacobi_hidden_states.device != dev_ref:
-                    jacobi_hidden_states = jacobi_hidden_states.to(dev_ref, non_blocking=True)
+                if self.fuser is not None:
+                    emb_jacobi_inputs = self.model.embed_tokens(jacobi_inputs)
+                    emb_jacobi_inputs = emb_jacobi_inputs.to(self.fuser.weight.device)
+                    jacobi_hidden_states = jacobi_hidden_states.to(self.fuser.weight.device)
+                    jacobi_hidden_states = torch.cat([emb_jacobi_inputs, jacobi_hidden_states], dim=-1)  #[B * G, 2H]
+                    jacobi_hidden_states = self.fuser(jacobi_hidden_states)
+                
+                # --- get logits ---
+                logits = None # no need full logits    
+                jacobi_logits = self.lm_head(jacobi_hidden_states)
 
-                # logits -> [N, V]
-                idx_l = flat_idx.to(logits.device, non_blocking=True)
-                jacobi_logits = logits.reshape(B * L, V).index_select(0, idx_l)
-                # already on dev_ref if you picked logits.device; otherwise:
-                if jacobi_logits.device != dev_ref:
-                    jacobi_logits = jacobi_logits.to(dev_ref, non_blocking=True)
+            # --- inference mode ---
+            else:
+                # retrive the last normal hidden states
+                if prev_indices is not None:
+                    logits = self.lm_head(hidden_states[prev_indices]) # [B * L, V]  (cheap)
+                else:
+                    logits = self.lm_head(hidden_states)
+                jacobi_logits = None
+                b_idx, j_idx = jacobi_indices
+                b_idx = b_idx.to(hidden_states.device)
+                j_idx = j_idx.to(hidden_states.device)
+                jacobi_hidden_states = hidden_states[b_idx, j_idx]
 
-                # 3) All-layer hidden states -> [LAYER, N, H] (each layer may be on a different GPU)
-                if output_hidden_states:
-                    j_layers = []
-                    for t in outputs.hidden_states:  # each t: [B, L, H], possibly on cuda:k
-                        idx_t = flat_idx.to(t.device, non_blocking=True)
-                        j = t.reshape(B * L, H).index_select(0, idx_t)
-                        # co-locate for stacking/consumption
-                        if j.device != dev_ref:
-                            j = j.to(dev_ref, non_blocking=True)
-                        j_layers.append(j)
-                    jacobi_all_hidden_states = torch.stack(j_layers, dim=0)  # [LAYER, N, H] on dev_ref
+            if output_hidden_states:
+                dev_ref = jacobi_logits.device
+                j_layers = []
+                for t in outputs.hidden_states:  # each t: [B, L, H], possibly on cuda:k
+                    idx_t = flat_idx.to(t.device, non_blocking=True)
+                    j = t.reshape(B * L, H).index_select(0, idx_t)
+                    # co-locate for stacking/consumption
+                    if j.device != dev_ref:
+                        j = j.to(dev_ref, non_blocking=True)
+                    j_layers.append(j)
+                jacobi_all_hidden_states = torch.stack(j_layers, dim=0)  # [LAYER, N, H] on dev_ref
 
             return JacobiCausalLMOutputWithPast(
                 logits=logits,
                 jacobi_logits=jacobi_logits,
                 past_key_values=outputs.past_key_values,
+                hidden_states=hidden_states,
                 jacobi_hidden_states=jacobi_hidden_states,
-                jacobi_all_hidden_states=jacobi_all_hidden_states if output_hidden_states else None,
+                jacobi_all_hidden_states=jacobi_all_hidden_states,
                 attentions=outputs.attentions,
             )
 
@@ -1124,12 +1138,6 @@ class TaTa(nn.Module):
             else:
                 logits = self.lm_head(hidden_states)
 
-            # debug trace (kept as-is)
-            if hasattr(self, "wtf"):
-                self.wtf = torch.cat([self.wtf, logits.argmax(dim=-1)], dim=-1)
-            else:
-                self.wtf = logits.argmax(dim=-1)
-
             loss = None
             if labels is not None:
                 loss = self.loss_function(logits, labels, self.vocab_size, **loss_kwargs)
@@ -1147,9 +1155,10 @@ class TaTa(nn.Module):
             raise ValueError(f"Unknown decoding_mode: {self.decoding_mode}")
     
     @torch.no_grad()
-    def jagenerate(
+    def tagenerate(
             self,
             input_ids,
+            loss_mask,
             max_new_tokens=512,
             max_length=2048,
             do_sample=False,
@@ -1160,33 +1169,36 @@ class TaTa(nn.Module):
             force_autoregressive=False,
             tokenizer=None
             ):
-        
+        B = input_ids.shape[0]
+        V, H = self.lm_head.weight.shape
+        K = 27
+        J = self.num_jacobi_tokens
+        S = self.num_prev_sequences
+        JP = self.pad_token_id
+        dev = self.lm_head.weight.device
+        em_dev = self.model.embed_tokens.weight.device
+
         if not do_sample:
             temperature = 0.0
 
-        input_processor = InputProcessor(input_ids.dtype, torch.float32, input_ids.dtype, input_ids.device, self.num_jacobi_tokens, self.num_prev_sequences)
+        tree = BatchedBeamTree(B, K, J, dev)
+        input_processor = InputProcessor(J, S, JP)
         past_key_values = DynamicCache()
         tt = 0
-        ct = {}
+        ct = 0
 
         # do the first inference
-        padding=(torch.zeros(1,1,dtype=torch.long)-1).to(input_ids.device)
-        input_ids = input_ids.clone()
-        input_ids = torch.cat([input_ids]+[padding]*self.num_jacobi_tokens, dim=-1)
-        loss_mask = []
-        prev_index, jacobi_index = [], []
-        for i in range(input_ids.shape[0]):
-            jacobi_indices = torch.nonzero(input_ids[i] == -1, as_tuple=True)
-            jacobi_indices_groups = jacobi_indices[0].view(-1, self.num_jacobi_tokens)
-            prev_index.append(jacobi_indices_groups[:, 0] - 1)
-            jacobi_index.append(jacobi_indices[0])
-            mask = torch.zeros_like(input_ids[i], device=input_ids.device)
-            mask[jacobi_indices] = 1
-            input_ids[i, jacobi_indices[0]] = 0
-            loss_mask.append(mask)
-        prev_index = torch.stack(prev_index, dim=0)
-        jacobi_index = torch.stack(jacobi_index, dim=0)
-        loss_mask = torch.stack(loss_mask, dim=0)
+        jac_b_idx, jac_l_idx = torch.nonzero(loss_mask == 1, as_tuple=True)
+
+        G = jac_l_idx.numel() // J
+
+        jac_b_idx = jac_b_idx.view(G, J)                                  # [G, J]
+        jac_l_idx = jac_l_idx[: G * J].view(G, J)                         # [G, J]
+        jacobi_indices = jac_b_idx, jac_l_idx
+        first_jac_b_idx = jac_b_idx[:, 0]                                 # [G] (first j batch idx)
+        first_jac_l_idx = jac_l_idx[:, 0]                                 # [G] (first j seq idx)
+        prev_jac_l_idx = first_jac_l_idx - 1
+        prev_indices = first_jac_b_idx, prev_jac_l_idx
 
         output = self.forward(
             input_ids=input_ids,
@@ -1194,147 +1206,107 @@ class TaTa(nn.Module):
             past_key_values=past_key_values,
             use_cache=True,
             output_hidden_states=False,
-            return_dict=True,
+            jacobi_indices = jacobi_indices,
+            prev_indices = prev_indices,
             inference=True
             )
+        
+        normal_token_len =torch.nonzero(loss_mask.cumsum(dim=-1) == 1, as_tuple=True)[1]
+        commit_real_positions = []
+        for b in range(B):
+            commit_real_positions.append([i for i in range(normal_token_len[b])])
+        past_seen_tokens = update_kv_cache(past_key_values, 0, commit_real_positions)
 
-        # only support batch == 1
-        route_indices = torch.nonzero(loss_mask[0] == 0, as_tuple=True)[0]
-        for layer_idx in range(len(output["past_key_values"].key_cache)):
-            output["past_key_values"].key_cache[layer_idx] = output["past_key_values"].key_cache[layer_idx][:, :, route_indices, :]
-            output["past_key_values"].value_cache[layer_idx] = output["past_key_values"].value_cache[layer_idx][:, :, route_indices, :]
-        past_seen_tokens = output["past_key_values"].get_seq_length()
-
-        normal_token = decoding_normal_token(output["logits"][i, prev_index[i]], temperature, top_p, top_k)
-        jacobi_token, jacobi_token_p, all_p = decoding_jacobi_token(output["logits"][i, jacobi_index[i]], temperature, top_p, top_k)
-        current_decoded_tokens = normal_token.view(1, -1)
-
-        # normal_token_dist = nn.Softmax(dim=-1)(output["logits"][0])
-        # s = decoding_normal_token(normal_token_dist)
-        # for i, (a, b) in enumerate(zip(input_ids[0], s)):
-        #     a = tokenizer.decode([a.item()])
-        #     b = tokenizer.decode([b.item()])
-        #     a = a.replace("\n", "\\n")
-        #     b = b.replace("\n", "\\n")
-        #     print(f"[{i}th] input token: <{a}>, output token: <{b}>")
+        normal_token = decoding_normal_token(output["logits"], temperature, top_p, top_k)
+        input_ids = normal_token.view(B, -1)
+        generated_tokens = input_ids.tolist()
+        jacobi_hidden_states = output["jacobi_hidden_states"]
 
         # loop start
-        while current_decoded_tokens.shape[-1] < max_new_tokens:
-            trees = []
-            input_ids, attention_mask, loss_mask, cache_position, jacobi_indices, cat_indices = [], [], [], [], [], []
-
-            tree = TreeStructure(normal_token.detach().cpu().item())
-            if PERFORMANCE_CHECK:
-                kwargs = {
-                    "jacobi_token": jacobi_token,
-                    "jacobi_token_p": jacobi_token_p
-                }
-                timer.record_time("build_tree", tree.build_tree, **kwargs)
-            else:
-                tree.build_tree(jacobi_token, jacobi_token_p)
-
-            if self.token_sets_inline:
-                if PERFORMANCE_CHECK:
-                    ith_input_ids, ith_attention_mask, ith_loss_mask, ith_cache_position, ith_jacobi_indices, ith_cat_indices = timer.record_time("build_input_inline", input_processor.build_inputs_inline_jacobi_token, **{"tree":tree})
-                else:
-                    ith_input_ids, ith_attention_mask, ith_loss_mask, ith_cache_position, ith_jacobi_indices, ith_cat_indices = input_processor.build_inputs_inline_jacobi_token(tree)
+        while len(min(generated_tokens, key=lambda x: len(x))) < max_new_tokens:
+            # final layer sample
+            tree.init_roots(input_ids.view(-1))
+            for i in range(J):
+                jac_hidden_state = jacobi_hidden_states[:, [i]]
+                jac_hidden_state = jac_hidden_state.repeat(1, input_ids.shape[-1], 1)
+                logits = self.fuse_forward(input_ids, jac_hidden_state)
+                jacobi_token, jacobi_token_p, all_p = decoding_jacobi_token(logits, temperature, top_p, top_k, 3)
+                tree.expand_depth(jacobi_token, jacobi_token_p)
+                valid_mask = tree.alive_by_d[-1]
+                effect_idx = valid_mask[0].sum(-1)
+                input_ids = tree.tokens_by_d[-1][:, :effect_idx]
             
-            
-            # for k, layer in enumerate(tree.layers):
-            #     for node in layer:
-            #         parent = node.parent.val if node.parent is not None else None
-            #         print(f"[{k}th layer] val: {node.val}, parent: {parent}, rouute: {node.route}")
-            input_ids.append(ith_input_ids)
-            attention_mask.append(ith_attention_mask)
-            loss_mask.append(ith_loss_mask)
-            cache_position.append(ith_cache_position)
-            jacobi_indices.append(ith_jacobi_indices)
-            cat_indices.append(ith_cat_indices)
-            
-            trees.append(tree)
-
-            input_ids = torch.stack(input_ids, dim=0)
-            attention_mask = torch.stack(attention_mask, dim=0)
-            loss_mask = torch.stack(loss_mask, dim=0)
-            cache_position = torch.stack(cache_position, dim=0)
-            jacobi_indices = torch.stack(jacobi_indices, dim=0)
-            cat_indices = torch.stack(cat_indices, dim=0)
-
-            # print(f"="*60 + f" {current_decoded_tokens.shape[0]} " + f"="*60)
-            # for i in range(attention_mask[0, 0].shape[0]):
-            #     print((attention_mask[0, 0, i] / attention_mask.min()).detach().cpu().type(torch.int16).tolist())
-            # # print()
-            # print(loss_mask[0].detach().cpu().tolist())
-            # print(cache_position[0].detach().cpu().tolist())
-
+            inputs = _time("build_input_data", input_processor.build_data, tree=tree)
             output = self.forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                loss_mask=loss_mask,
-                past_key_values=output["past_key_values"],
+                input_ids=inputs.input_ids,
+                attention_mask=inputs.attn_mask,
+                loss_mask=inputs.loss_mask,
+                past_key_values=past_key_values,
                 use_cache=True,
-                cache_position=cache_position,
+                cache_position=inputs.cache_position,
                 output_hidden_states=False,
-                return_dict=True,
-                jacobi_indices = jacobi_indices,
-                cat_indices = cat_indices,
+                jacobi_indices = inputs.jacobi_indices,
+                cat_indices = inputs.cat_indices,
                 inference=True
                 )
             
-            i = 0  # only support batch == 1
-
-            # sample
-            token_sampled = decoding_normal_token(output["logits"][i], temperature, top_p, top_k)
+            # verify
+            verify_result = _time(
+                "verify", 
+                verify_routes, 
+                logits=output["logits"],     # [B, L, V]
+                pack=inputs,
+                tree=tree,
+                do_sample=do_sample,
+                temperature=temperature,
+                top_k=int(top_k) if top_k is not None else 0,
+                top_p=float(top_p) if top_p is not None else 0.0
+                )
             
-            # 
-            entropy = calculate_entropy(all_p)
-            threshold = get_threshold(entropy)
+            past_seen_tokens = _time(
+                "update_kv_cache", 
+                update_kv_cache,
+                past_key_values=past_key_values,
+                past_seen_tokens=past_seen_tokens,
+                commit_real_positions=verify_result.commit_real_positions
+            )
 
-            # verify (cheap)
-            route_indices, ans_list = verify_final_route(input_ids[i], token_sampled, trees[i], force_autoregressive, do_sample, tokenizer)
-            tt += 1
-            for c in range(len(ans_list)):
-                if tuple(ans_list[:c+1]) in ct:
-                    ct[tuple(ans_list[:c+1])] += 1
-                else:
-                    ct[tuple(ans_list[:c+1])] = 1
-            
-            verified_tokens = token_sampled[route_indices]
-            current_decoded_tokens = torch.cat([current_decoded_tokens, verified_tokens.view(1, -1)], dim=-1)
-            if self.model.config.eos_token_id in current_decoded_tokens:
-                break
+            # update generated tokens
+            input_ids = []
+            for b in range(B):
+                # print(tokenizer.decode(verify_result.commit_preds[b]))
+                generated_tokens[b] += verify_result.commit_preds[b]
+                input_ids.append(verify_result.commit_preds[b][-1])
+                ct += len(verify_result.commit_preds[b])
+            tt += B
 
-            # print(current_decoded_tokens)
-            # handle cache
-            if PERFORMANCE_CHECK:
-                timer.record_time("update_kv_cache", update_kv_cache, **{"output":output, "route_indices":route_indices, "past_seen_tokens":past_seen_tokens})
-            else:
-                update_kv_cache(output, route_indices, past_seen_tokens)
-            past_seen_tokens = output["past_key_values"].get_seq_length()
-            
-            # prepare next input
-            normal_token = token_sampled[route_indices][-1]
-            jacobi_index_start = route_indices[-1]+1
-            jacobi_index_end = jacobi_index_start + self.num_jacobi_tokens
-            selected_jacobi_indices = torch.arange(jacobi_index_start, jacobi_index_end)
-            jacobi_token_logits = output["logits"][i][selected_jacobi_indices]
-            jacobi_token, jacobi_token_p, all_p = decoding_jacobi_token(jacobi_token_logits, temperature, top_p, top_k)
-        return current_decoded_tokens[:max_new_tokens], tt, ct
+            input_ids = torch.tensor(input_ids, dtype=torch.long, device=em_dev).view(B, -1)
+            out = jp_indices_after_commit(inputs, verify_result, J)
+            idx = out.to(dtype=torch.long, device=output["hidden_states"].device)
+            idx_expanded = idx.unsqueeze(-1).expand(-1, -1, H)  # [B, J, H]
+            jacobi_hidden_states = output["hidden_states"].gather(1, idx_expanded)  # [B, J, H]
+            tree.reset()
+        # print(f"{ct/tt:.4f}")
+        # print(timer.pretty())
+        return generated_tokens, tt, ct
 
-def update_kv_cache(output, route_indices, past_seen_tokens):
-    device = output["past_key_values"].key_cache[0].device
-    route_indices_tensor = torch.tensor(route_indices, device=device)
+@torch.no_grad()
+def jp_indices_after_commit(pack, verify_result, J: int) -> torch.LongTensor:
+    """
+    Returns JP indices right after the final accepted token for each batch.
+    Shape: [B, J]; filled with -1 if a row is invalid (shouldn't happen if pack was built normally).
+    """
+    B = pack.input_ids.size(0)
+    dev = pack.input_ids.device
+    out = torch.full((B, J), -1, dtype=torch.long, device=dev)
 
-    # Efficiently create cache indices
-    cache_indices = torch.cat([torch.arange(0, past_seen_tokens, device=device), route_indices_tensor + past_seen_tokens], dim=-1)
-
-    for layer_idx in range(len(output["past_key_values"].key_cache)):
-            key_cache = output["past_key_values"].key_cache[layer_idx]
-            value_cache = output["past_key_values"].value_cache[layer_idx]
-
-            # Use `index_select` for faster tensor slicing
-            output["past_key_values"].key_cache[layer_idx] = key_cache.index_select(2, cache_indices)
-            output["past_key_values"].value_cache[layer_idx] = value_cache.index_select(2, cache_indices)
+    for b in range(B):
+        d = int(verify_result.commit_depth[b].item())
+        k = int(verify_result.commit_beam[b].item())
+        p = int(pack.real_pos[b, d, k].item())
+        if p >= 0:
+            out[b] = torch.arange(p + 1 , p + 1 + J, device=dev)
+    return out
 
 def decoding_normal_token(logits, temperature=0.0, top_p=0.0, top_k=0.0):
     """
@@ -1411,10 +1383,10 @@ def decoding_jacobi_token(logits, temperature=0.0, top_p=0.0, top_k=0, expand=3)
     """
     # Step 1: Greedy decoding case (your suggestion, returning probs)
     if temperature == 0.0 and top_p == 0.0 and top_k == 0:
-        probs = torch.softmax(logits, dim=-1)
-        top = torch.topk(probs, expand, dim=-1)
+        logprobs = F.log_softmax(logits, dim=-1)
+        top = torch.topk(logprobs, expand, dim=-1)
         topk_index, topk_probs = top.indices, top.values
-        return topk_index, topk_probs, probs  # Return full probs in greedy mode
+        return topk_index, topk_probs, logprobs  # Return full probs in greedy mode
     
     # Step 2: Sampling mode (temperature > 0 or top_k/top_p specified)
     # Apply temperature scaling to logits
@@ -1443,73 +1415,11 @@ def decoding_jacobi_token(logits, temperature=0.0, top_p=0.0, top_k=0, expand=3)
             logits[batch_idx, seq_idx, original_idx] = -float('inf')
     
     # Step 5: Compute full probability distribution
-    probs = torch.softmax(logits, dim=-1)
+    logprobs = F.log_softmax(logits, dim=-1)
     
     # Step 6: Get top `expand` candidates from probabilities
-    top = torch.topk(probs, expand, dim=-1)
+    top = torch.topk(logprobs, expand, dim=-1)
     topk_index, topk_p = top.indices, top.values
     
     # Return indices, their probabilities, and full distribution
-    return topk_index, topk_p, probs
-
-def verify_final_route(inputs, outputs, tree, force_autoregressive=False, do_sample=False, tokenizer=None):
-    # print("="*100)
-    curr_node = tree.root
-    index = tree.index_dict[curr_node]
-    curr_ans, final_route, ans_list = outputs[index], curr_node.route, []
-
-    
-    if not force_autoregressive:
-        found_ans = True
-        while len(curr_node.children) > 0 and found_ans:
-            found_ans = False
-            for i, node in enumerate(curr_node.children):
-                index = tree.index_dict[node]
-                curr_pred, next_ans = inputs[index], outputs[index]
-
-                # a, b, c = tokenizer.decode([curr_ans]), tokenizer.decode([curr_pred]), tokenizer.decode([next_ans])
-                # a = a.replace("\n", "\\n")
-                # b = b.replace("\n", "\\n")
-                # c = c.replace("\n", "\\n")
-                # print(f"ans: <{a}>, pred: <{b}>, next_ans: <{c}>")
-                if do_sample:
-                    pass
-                else:
-                    if curr_pred == curr_ans:
-                        final_route = node.route
-                        curr_ans = next_ans
-                        curr_node = node
-                        found_ans = True
-                        ans_list.append(i)
-                        break
-
-    return final_route, ans_list
-
-def calculate_entropy(posterior_prob):
-    return -torch.sum(
-            posterior_prob * torch.log(posterior_prob + 1e-5), dim=-1
-        )
-
-def get_threshold(posterior_entropy, posterior_threshold=0.3, posterior_alpha = 0.09):
-    return torch.minimum(
-        torch.ones_like(posterior_entropy) * posterior_threshold,
-        torch.exp(-posterior_entropy) * posterior_alpha,
-    )
-
-def prepare_logits_processor(
-        temperature: float = 0.0,
-        repetition_penalty: float = 0.0,
-        top_p: float = 0.0,
-        top_k: int = 0
-) -> LogitsProcessorList:
-    processor_list = LogitsProcessorList()
-    if temperature > 1e-5:
-        if temperature >= 1e-5 and temperature != 1.0:
-            processor_list.append(TemperatureLogitsWarper(temperature))
-        if repetition_penalty > 1.0:
-            processor_list.append(RepetitionPenaltyLogitsProcessor(repetition_penalty))
-        if 1e-8 <= top_p < 1.0:
-            processor_list.append(TopPLogitsWarper(top_p))
-        if top_k > 0:
-            processor_list.append(TopKLogitsWarper(top_k))
-    return processor_list
+    return topk_index, topk_p, logprobs

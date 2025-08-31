@@ -1,3 +1,6 @@
+import json
+import yaml
+from pathlib import Path
 from dataclasses import dataclass, field
 
 def to_obj(obj, cls):
@@ -64,6 +67,7 @@ class TModelCfg:
     adapter_type: str = "Qwen2MLP"
     shared_adapter: bool = False
     fuse_prev_hidden_states: bool = True
+    fuse_jacobi_with_prev_sample: bool = True
     shared_jacobi_token: bool = True
     jacobi_adapter_kwargs: dict =field(
         default_factory=lambda: {
@@ -114,8 +118,85 @@ class TrainCfg:
     save_freq: int = 1
 
 @dataclass
+class EvalCfg:
+    count_word_distribution: bool = False
+
+@dataclass
 class TrainScriptConfig:
     meta: TMetaCfg
     model: TModelCfg
     data: TDataCfg
     train: TrainCfg
+    eval: EvalCfg
+
+@dataclass
+class IModelCfg:
+    path: str = "./jacobi_test_weights/Qwen3-CFG01"
+    cfg_name: str = "train_cfg.yaml"
+    state: str = "state_5"
+    weight_name: str = "model_weight.pt"
+    token_sets_inline: bool = True
+
+@dataclass
+class IDataCfg:
+    test_data_path: list = field(
+        default_factory = lambda: [
+            "openai/openai_humaneval"
+        ]
+    )
+    num_workers: int = 2
+    pad_token_id: int = 0
+
+@dataclass
+class InferCfg:
+    bs: int = 1
+    max_new_tokens: int = 128
+    do_sample: bool = False
+    top_p: float = 0.9
+    top_k: int = 64
+    repetition_penalty: float = 1.0 
+    temperature: float = 1.0
+
+@dataclass
+class InferenceConfig:
+    model: IModelCfg
+    data: IDataCfg
+    infer: InferCfg
+
+def basic_load(path):
+    p = Path(path)
+    text = p.read_text()
+    if p.suffix.lower() in {".yaml", ".yml"}:
+        if yaml is None:
+            raise RuntimeError("PyYAML is not installed, but a YAML config was provided.")
+        obj = yaml.safe_load(text)
+    else:
+        raise NotImplementedError(f"currently only support yaml file, but got {p.suffix.lower()}")
+    return obj
+
+def load_gen_data_config(path: str) -> GenDataConfig:
+    obj = basic_load(path)
+    return GenDataConfig(
+        gen=to_obj(obj["gen"], GenCfg),
+        data=to_obj(obj["data"], DataCfg),
+        model=to_obj(obj["model"], ModelCfg),
+        save_probs=to_obj(obj["save_probs"], SaveLogProbsCfg),
+    )
+
+def load_train_config(path: str) -> TrainScriptConfig:
+    obj = basic_load(path)
+    return TrainScriptConfig(
+        meta=to_obj(obj["meta"], TMetaCfg),
+        data=to_obj(obj["data"], TDataCfg),
+        model=to_obj(obj["model"], TModelCfg),
+        train=to_obj(obj["train"], TrainCfg),
+        eval=to_obj(obj["eval"], EvalCfg)
+    )
+
+def load_infer_config(path: str) -> InferenceConfig:
+    obj = basic_load(path)
+    return InferenceConfig(
+        model=to_obj(obj["model"], IModelCfg),
+        data=to_obj(obj["data"], IDataCfg),
+        infer=to_obj(obj["infer"], InferCfg)
+    )

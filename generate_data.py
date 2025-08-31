@@ -34,7 +34,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from configs.config import GenCfg, DataCfg, ModelCfg, SaveLogProbsCfg, GenDataConfig, to_obj
+from configs.config import SaveLogProbsCfg, GenDataConfig, load_gen_data_config
 try:
     import yaml  # type: ignore
 except Exception:  # yaml is optional; JSON still works
@@ -50,49 +50,6 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def load_config(path: str) -> GenDataConfig:
-    p = Path(path)
-    text = p.read_text()
-    if p.suffix.lower() in {".yaml", ".yml"}:
-        if yaml is None:
-            raise RuntimeError("PyYAML is not installed, but a YAML config was provided.")
-        obj = yaml.safe_load(text)
-    else:
-        obj = json.loads(text)
-
-    # Backward‑compat with the user's original JSON
-    if "name" in obj:  # flat schema -> lift into sections
-        obj = {
-            "gen": {
-                "name": obj.get("name", "GE1"),
-                "max_len": obj.get("max_len", 2048),
-                "jacobi_tokens": obj.get("jacobi_tokens", 100),
-                "output_folder": obj.get("output_folder", "./datasets"),
-            },
-            "data": {
-                "data_name": obj.get("data_name"),
-                "split": "train",
-                "start": obj.get("data_start", 0),
-                "end": obj.get("data_end", 20000),
-                "adapter": "sharegpt",
-            },
-            "model": {
-                "model_path": obj.get("model_path"),
-                "model_name": obj.get("model_name"),
-            },
-            "save_probs": {
-                "mode": "topk",
-                "top_k": 64,
-                "dtype": "float16",
-            },
-        }
-
-    return GenDataConfig(
-        gen=to_obj(obj["gen"], GenCfg),
-        data=to_obj(obj["data"], DataCfg),
-        model=to_obj(obj["model"], ModelCfg),
-        save_probs=to_obj(obj["save_probs"], SaveLogProbsCfg),
-    )
 
 
 def ensure_dir(path: Path) -> None:
@@ -405,7 +362,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="./configs/generate_data_cfg.yaml")
     args = parser.parse_args()
-    config = load_config(args.config)
+    config = load_gen_data_config(args.config)
     main(config)
 
 
